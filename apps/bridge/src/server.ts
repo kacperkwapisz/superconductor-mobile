@@ -7,9 +7,10 @@ import { readFile } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { spawn } from "node:child_process";
-import { isSafeSessionPath, parseTranscript } from "./transcript.ts";
+import { isSafeSessionPath, parseTranscript, tailNewMessages, type TailState } from "./transcript.ts";
 import { parseFooter } from "./footer.ts";
 import { spawnRpcAgent, getRpcAgent, listRpcAgents, stopRpcAgent } from "./rpc-manager.ts";
+import { WORKTREE_ACTIONS, actionById } from "./worktree-actions.ts";
 
 const VERSION = "0.1.0";
 const TRANSCRIPT_LIMIT = 250; // most-recent messages sent to the phone (huge sessions stay snappy)
@@ -244,6 +245,42 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
             const all = await parseTranscript(sid);
             const messages = all.slice(-TRANSCRIPT_LIMIT);
             return json({ kind: "transcript", response: { session_id: sid, messages } });
+          })
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+
+      if (url.pathname === "/v1/worktree/actions" && req.method === "GET") {
+        return json({ kind: "worktree_actions", response: { actions: WORKTREE_ACTIONS.map((a) => ({ id: a.id, title: a.title, kind: a.kind })) } });
+      }
+
+      const wtActionMatch = url.pathname.match(/^\/v1\/worktrees\/([^/]+)\/action$/);
+      if (wtActionMatch && req.method === "POST") {
+        const worktreePath = decodeURIComponent(wtActionMatch[1]!);
+        return req
+          .json()
+          .then((body: { action?: string; provider?: string }) => runWorktreeAction(worktreePath, body))
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+      if (url.pathname === "/v1/models" && req.method === "GET") {
+        const provider = url.searchParams.get("provider") ?? "pi";
+        return listChatModels(provider)
+          .then((models) => json({ kind: "models", response: { models } }))
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+      const setModelMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/set-model$/);
+      if (setModelMatch && req.method === "POST") {
+        const target = decodeTarget(setModelMatch[1]!);
+        return req
+          .json()
+          .then((body: { modelId?: string; queue?: boolean }) => {
+            const modelId = body.modelId?.trim();
+            if (!modelId) return json({ ok: false, error: { code: "validation", message: "modelId required" } }, 400);
+            const args = ["agent", "send", "--to", target, "--prompt", `/model ${modelId}`, ...worktreeArgs(url), "--output", "json"];
+            if (body.queue) args.push("--queue");
+            return scJson<unknown>(args).then(() => json({ ok: true }));
           })
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
       }
@@ -550,7 +587,7 @@ async function serveAvatar(projectId: string): Promise<Response> {
   return new Response(file, { headers: { "Content-Type": "image/png", "Cache-Control": "max-age=86400" } });
 }
 
-// A: stream a Pi transcript live by re-parsing the JSONL on each append (files are small).
+// A: stream Pi transcript live — initial backlog once, then incremental tail reads.
 async function openTranscriptStream(
   ws: ServerWebSocket<WsData>,
   data: Extract<WsData, { kind: "transcript" }>,
@@ -567,39 +604,66 @@ async function openTranscriptStream(
     return;
   }
   const path = sid;
-  let sent = -1; // -1 = not yet initialized
+  const tail: TailState = { offset: 0, partial: "" };
   let pushing = false;
   const push = async () => {
     if (pushing) return;
     pushing = true;
     try {
-      const messages = await parseTranscript(path);
-      const start = sent < 0 ? Math.max(0, messages.length - TRANSCRIPT_LIMIT) : sent;
-      if (sent < 0 || messages.length > sent) {
-        ws.send(JSON.stringify({ kind: "transcript_append", messages: messages.slice(start) }));
-        sent = messages.length;
+      if (tail.offset === 0) {
+        const all = await parseTranscript(path);
+        const messages = all.slice(-TRANSCRIPT_LIMIT);
+        if (!messages.length) {
+          try {
+            const { size } = await Bun.file(path).stat();
+            tail.offset = size;
+          } catch { /* file not created yet */ }
+        } else {
+          ws.send(JSON.stringify({ kind: "transcript_append", messages }));
+          try {
+            const { size } = await Bun.file(path).stat();
+            tail.offset = size;
+          } catch {
+            tail.offset = 0;
+          }
+        }
+      } else {
+        const messages = await tailNewMessages(path, tail);
+        if (messages.length) {
+          ws.send(JSON.stringify({ kind: "transcript_append", messages }));
+        }
       }
     } catch { /* file briefly unreadable during write */ } finally {
       pushing = false;
     }
   };
-  await push(); // initial backlog
-  // Coalesce rapid writes: an active turn appends many lines/sec; one push per 250ms is plenty.
+  await push();
   const base = basename(path);
   let timer: ReturnType<typeof setTimeout> | null = null;
   const schedule = () => {
     if (timer) return;
-    timer = setTimeout(() => { timer = null; void push(); }, 250);
+    timer = setTimeout(() => { timer = null; void push(); }, 50);
   };
-  try {
-    // Watch the directory (not the file): handles sessions whose .jsonl doesn't exist yet.
-    data.watcher = watch(dirname(path), (_evt, filename) => {
-      if (filename && filename !== base) return; // ignore other sessions in the same dir
-      schedule();
-    });
-  } catch (e) {
-    ws.send(JSON.stringify({ kind: "bridge_error", message: formatErr(e).message }));
-  }
+  const attachWatch = () => {
+    try {
+      data.watcher = watch(path, schedule);
+    } catch {
+      data.watcher = watch(dirname(path), (_evt, filename) => {
+        if (filename && filename !== base) return;
+        schedule();
+      });
+    }
+  };
+  attachWatch();
+}
+
+async function listChatModels(providerKey: string): Promise<{ id: string; label: string }[]> {
+  const body = await scJson<{
+    kind?: string;
+    providers?: { provider_key: string; models?: { id: string; label?: string }[] }[];
+  }>(["chat", "providers", "--json"]);
+  const prov = body.providers?.find((p) => p.provider_key === providerKey);
+  return (prov?.models ?? []).map((m) => ({ id: m.id, label: m.label ?? m.id }));
 }
 
 function formatErr(e: unknown): { code: string; message: string } {

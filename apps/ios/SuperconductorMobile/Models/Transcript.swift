@@ -1,11 +1,16 @@
 import Foundation
 
+struct ModelOption: Identifiable, Equatable {
+    var id: String
+    var label: String
+}
+
 struct AgentFooter: Decodable, Equatable {
-    var model: String?
-    var branch: String?
-    var cost: String?
-    var contextPct: Int?
-    var time: String?
+    var model: String? = nil
+    var branch: String? = nil
+    var cost: String? = nil
+    var contextPct: Int? = nil
+    var time: String? = nil
 
     var isEmpty: Bool { model == nil && branch == nil && cost == nil && contextPct == nil }
 }
@@ -14,9 +19,14 @@ struct ChatToolCall: Identifiable, Equatable {
     var id: String
     var name: String
     var argsPreview: String
+    var resultPreview: String? = nil
+    var isError: Bool = false
+
+    var hasResult: Bool { resultPreview != nil }
 }
 
 struct ChatToolResult: Equatable {
+    var toolCallId: String? = nil
     var toolName: String
     var isError: Bool
     var preview: String
@@ -45,7 +55,12 @@ struct ChatMessageDTO: Decodable {
     var toolResult: ToolResultDTO?
 
     struct ToolCallDTO: Decodable { var id: String; var name: String; var argsPreview: String }
-    struct ToolResultDTO: Decodable { var toolName: String; var isError: Bool; var preview: String }
+    struct ToolResultDTO: Decodable {
+        var toolCallId: String?
+        var toolName: String
+        var isError: Bool
+        var preview: String
+    }
 
     func toMessage(id: String) -> ChatMessage {
         ChatMessage(
@@ -92,6 +107,7 @@ extension ChatMessage {
             return ChatMessage(
                 id: id, role: role,
                 toolResult: ChatToolResult(
+                    toolCallId: m["toolCallId"] as? String,
                     toolName: (m["toolName"] as? String) ?? "tool",
                     isError: (m["isError"] as? Bool) ?? false,
                     preview: texts.joined(separator: "\n")

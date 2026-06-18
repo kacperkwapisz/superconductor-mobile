@@ -6,6 +6,8 @@ struct WorkspacesView: View {
     @State private var expandedWorktrees: Set<String> = []
     @State private var pendingRpc: RpcSession?
     @State private var launching = false
+    @State private var worktreeActions: [WorktreeActionItem] = []
+    @State private var runningAction: String?
 
     struct RpcSession: Identifiable, Hashable { var id: String; var title: String }
 
@@ -50,7 +52,10 @@ struct WorkspacesView: View {
                 }
             }
             .refreshable { await refresh() }
-            .task { if session.workspaces.isEmpty { await refresh() } }
+            .task {
+                if session.workspaces.isEmpty { await refresh() }
+                await ensureActions()
+            }
             .alert("Error", isPresented: .init(
                 get: { session.lastError != nil },
                 set: { if !$0 { session.lastError = nil } }
@@ -224,6 +229,16 @@ struct WorkspacesView: View {
             }
         }
         .contextMenu {
+            if !worktreeActions.isEmpty {
+                Section("Worktree") {
+                    ForEach(worktreeActions) { act in
+                        Button(act.title, systemImage: iconForAction(act.id)) {
+                            Task { await runAction(act.id, path: wt.path) }
+                        }
+                        .disabled(runningAction != nil)
+                    }
+                }
+            }
             Button("Start live agent", systemImage: "bolt.fill") {
                 Task { await startLive(path: wt.path, title: wt.displayName) }
             }
@@ -283,6 +298,36 @@ struct WorkspacesView: View {
             if let t = wt.relativeTime {
                 Text(t).font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
             }
+        }
+    }
+
+    private func ensureActions() async {
+        guard worktreeActions.isEmpty, let c = session.connection else { return }
+        if let list = try? await BridgeAPI.fetchWorktreeActions(connection: c) {
+            worktreeActions = list
+        }
+    }
+
+    private func iconForAction(_ id: String) -> String {
+        switch id {
+        case "create_pr": return "arrow.triangle.pull"
+        case "commit_push", "inline_commit": return "arrow.up.doc"
+        case "resolve_conflicts": return "wand.and.stars"
+        case "fix_ci": return "checkmark.circle"
+        case "fix_merge_blocked": return "exclamationmark.triangle"
+        case "squash_merge", "merge_commit", "rebase_merge": return "arrow.triangle.merge"
+        default: return "gearshape"
+        }
+    }
+
+    private func runAction(_ action: String, path: String) async {
+        guard let c = session.connection, runningAction == nil else { return }
+        runningAction = action
+        defer { runningAction = nil }
+        do {
+            try await BridgeAPI.runWorktreeAction(connection: c, worktreePath: path, action: action)
+        } catch {
+            session.lastError = error.localizedDescription
         }
     }
 

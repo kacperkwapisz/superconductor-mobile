@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, open, stat } from "node:fs/promises";
 
 const SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
 const PREVIEW_LIMIT = 2000;
@@ -11,7 +11,7 @@ export type ChatMessage = {
   text?: string;
   thinking?: string;
   toolCalls?: { id: string; name: string; argsPreview: string }[];
-  toolResult?: { toolName: string; isError: boolean; preview: string };
+  toolResult?: { toolCallId: string; toolName: string; isError: boolean; preview: string };
   model?: string;
 };
 
@@ -68,6 +68,7 @@ export function mapEntry(entry: unknown): ChatMessage | null {
 
   if (role === "toolResult") {
     out.toolResult = {
+      toolCallId: String(m.toolCallId ?? ""),
       toolName: String(m.toolName ?? "tool"),
       isError: m.isError === true,
       preview: preview(texts.join("\n")),
@@ -98,18 +99,56 @@ export async function parseTranscript(path: string): Promise<ChatMessage[]> {
 export function parseJsonl(raw: string): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(t);
-    } catch {
-      continue;
-    }
-    const msg = mapEntry(parsed);
+    const msg = parseJsonlLine(line);
     if (msg) out.push(msg);
   }
   return out;
+}
+
+function parseJsonlLine(line: string): ChatMessage | null {
+  const t = line.trim();
+  if (!t) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(t);
+  } catch {
+    return null;
+  }
+  return mapEntry(parsed);
+}
+
+/** Incremental tail: read only bytes appended since `state.offset`. */
+export type TailState = { offset: number; partial: string };
+
+export async function tailNewMessages(path: string, state: TailState): Promise<ChatMessage[]> {
+  let size: number;
+  try {
+    size = (await stat(path)).size;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
+  }
+  if (size < state.offset) state.offset = 0; // truncated / rotated
+  if (size === state.offset) return [];
+
+  const fh = await open(path, "r");
+  try {
+    const len = size - state.offset;
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, state.offset);
+    state.offset += bytesRead;
+    const chunk = state.partial + buf.subarray(0, bytesRead).toString("utf8");
+    const lines = chunk.split("\n");
+    state.partial = lines.pop() ?? "";
+    const out: ChatMessage[] = [];
+    for (const line of lines) {
+      const msg = parseJsonlLine(line);
+      if (msg) out.push(msg);
+    }
+    return out;
+  } finally {
+    await fh.close();
+  }
 }
 
 // --- self-check (ponytail) ---

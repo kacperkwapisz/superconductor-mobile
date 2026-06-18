@@ -135,6 +135,73 @@ enum BridgeAPI {
         return env.response.isEmpty ? nil : env.response
     }
 
+    static func fetchModels(connection: BridgeConnection, provider: String = "pi") async throws -> [ModelOption] {
+        var comp = URLComponents(url: BridgeURL.v1(connection, path: "/v1/models"), resolvingAgainstBaseURL: true)!
+        comp.queryItems = [URLQueryItem(name: "provider", value: provider)]
+        var req = URLRequest(url: comp.url!)
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await BridgeURLSession.http.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw BridgeAPIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        let env = try JSONDecoder().decode(ModelsEnvelope.self, from: data)
+        return env.response.models.map { ModelOption(id: $0.id, label: $0.label) }
+    }
+
+    static func setMirroredModel(
+        connection: BridgeConnection,
+        target: String,
+        modelId: String,
+        worktree: String?,
+        queue: Bool = false
+    ) async throws {
+        let encoded = AgentTargetEncoding.encode(target)
+        let url = withWorktree(BridgeURL.v1(connection, path: BridgeURL.agentPath(encodedTarget: encoded, suffix: "/set-model")), worktree)
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 20
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try JSONEncoder().encode(SetModelBody(modelId: modelId, queue: queue))
+        let (data, resp) = try await BridgeURLSession.http.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            if let http = resp as? HTTPURLResponse, let msg = String(data: data, encoding: .utf8) {
+                throw BridgeAPIError.message("HTTP \(http.statusCode): \(msg)")
+            }
+            throw BridgeAPIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+    }
+
+
+    static func fetchWorktreeActions(connection: BridgeConnection) async throws -> [WorktreeActionItem] {
+        let url = BridgeURL.v1(connection, path: "/v1/worktree/actions")
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await BridgeURLSession.http.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw BridgeAPIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        return try JSONDecoder().decode(WorktreeActionsEnvelope.self, from: data).response.actions
+    }
+
+    static func runWorktreeAction(connection: BridgeConnection, worktreePath: String, action: String, provider: String = "pi") async throws {
+        let enc = worktreePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? worktreePath
+        let url = BridgeURL.v1(connection, path: "/v1/worktrees/\(enc)/action")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 120
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try JSONEncoder().encode(WorktreeActionBody(action: action, provider: provider))
+        let (data, resp) = try await BridgeURLSession.http.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            if let http = resp as? HTTPURLResponse, let msg = String(data: data, encoding: .utf8) {
+                throw BridgeAPIError.message("HTTP \(http.statusCode): \(msg)")
+            }
+            throw BridgeAPIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+    }
+
     static func stopRpcAgent(connection: BridgeConnection, rpcId: String) async {
         let url = BridgeURL.v1(connection, path: "/v1/rpc/agents/\(rpcId)/stop")
         var req = URLRequest(url: url)
@@ -150,6 +217,19 @@ private struct RpcAgentEnvelope: Decodable {
 }
 
 private struct FooterEnvelope: Decodable { var response: AgentFooter }
+
+private struct ModelsEnvelope: Decodable {
+    var response: ModelsBody
+    struct ModelsBody: Decodable {
+        var models: [ModelDTO]
+    }
+    struct ModelDTO: Decodable { var id: String; var label: String }
+}
+
+private struct SetModelBody: Encodable {
+    var modelId: String
+    var queue: Bool
+}
 
 enum BridgeAPIError: Error, LocalizedError {
     case http(Int)
@@ -215,4 +295,20 @@ private struct AgentReadInner: Decodable {
 private struct ReadTarget: Decodable {
     var ok: Bool?
     var lines: [String]?
+}
+
+struct WorktreeActionItem: Identifiable, Decodable, Equatable {
+    var id: String
+    var title: String
+    var kind: String
+}
+
+private struct WorktreeActionsEnvelope: Decodable {
+    var response: WorktreeActionsBody
+    struct WorktreeActionsBody: Decodable { var actions: [WorktreeActionItem] }
+}
+
+private struct WorktreeActionBody: Encodable {
+    var action: String
+    var provider: String
 }

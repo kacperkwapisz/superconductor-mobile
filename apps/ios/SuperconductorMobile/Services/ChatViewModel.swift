@@ -41,6 +41,37 @@ final class ChatViewModel {
         }
     }
 
+    var canSwitchModel: Bool { true }
+
+    func loadModels() async throws -> [ModelOption] {
+        try await BridgeAPI.fetchModels(connection: connection, provider: "pi")
+    }
+
+    func switchModel(to modelId: String) async {
+        switch mode {
+        case let .transcript(target, worktree):
+            do {
+                try await BridgeAPI.setMirroredModel(
+                    connection: connection,
+                    target: target,
+                    modelId: modelId,
+                    worktree: worktree,
+                    queue: isStreaming
+                )
+                var f = footer ?? AgentFooter()
+                f.model = modelId.contains("/") ? String(modelId.split(separator: "/").last!) : modelId
+                footer = f
+            } catch {
+                lastError = error.localizedDescription
+            }
+        case .rpc:
+            let parts = modelId.split(separator: "/", maxSplits: 1).map(String.init)
+            let provider = parts.count > 1 ? parts[0] : "anthropic"
+            let mid = parts.count > 1 ? parts[1] : modelId
+            sendRaw(["type": "set_model", "id": "set_model", "provider": provider, "modelId": mid])
+        }
+    }
+
     /// Committed messages + a live bubble: typed text for RPC, a working spinner for transcript.
     var displayMessages: [ChatMessage] {
         guard isStreaming else { return messages }
@@ -56,7 +87,7 @@ final class ChatViewModel {
         isStreaming = true
         quietTask?.cancel()
         quietTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: .seconds(2))
             if !Task.isCancelled { self?.isStreaming = false }
         }
     }
@@ -83,6 +114,7 @@ final class ChatViewModel {
             path = "/v1/rpc/agents/\(rpcId)/stream"
         }
         openSocket(BridgeURL.ws(connection, path: path))
+        startRpcStatsPolling()
     }
 
     private func openSocket(_ url: URL) {
@@ -93,6 +125,17 @@ final class ChatViewModel {
         t.resume()
         isConnected = true
         receiveTask = Task { await receiveLoop() }
+    }
+
+    // RPC agents expose get_session_stats over the same socket (exact cost + context%).
+    private func startRpcStatsPolling() {
+        footerTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                if self.isConnected { self.sendRaw(["type": "get_session_stats", "id": "stats"]) }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
     }
 
     private func startFooterPolling(target: String, worktree: String?) {
@@ -199,8 +242,28 @@ final class ChatViewModel {
                let delta = ev["delta"] as? String {
                 streamingText += delta
             }
+        case "response":
+            let cmd = obj["command"] as? String
+            if cmd == "get_session_stats", let data = obj["data"] as? [String: Any] {
+                var f = footer ?? AgentFooter()
+                if let cost = data["cost"] as? Double { f.cost = String(format: "%.2f", cost) }
+                if let cu = data["contextUsage"] as? [String: Any], let pct = cu["percent"] as? Double {
+                    f.contextPct = Int(pct)
+                }
+                footer = f
+            } else if cmd == "set_model", obj["success"] as? Bool == true, let data = obj["data"] as? [String: Any] {
+                var f = footer ?? AgentFooter()
+                if let id = data["id"] as? String { f.model = id }
+                else if let name = data["name"] as? String { f.model = name }
+                footer = f
+            } else if cmd == "set_model", obj["success"] as? Bool == false {
+                lastError = (obj["error"] as? String) ?? "Model switch failed"
+            }
         case "message_end":
             if let m = obj["message"] as? [String: Any] {
+                if m["role"] as? String == "assistant", let model = m["model"] as? String {
+                    var f = footer ?? AgentFooter(); f.model = model; footer = f
+                }
                 commitRawMessage(m)
             }
             streamingText = ""
@@ -225,9 +288,33 @@ final class ChatViewModel {
             if dto.role == "user", let last = messages.last, last.isUser, last.text == dto.text {
                 continue
             }
-            messages.append(dto.toMessage(id: "m-\(committedCount)"))
+            absorb(dto.toMessage(id: "m-\(committedCount)"))
             committedCount += 1
         }
+    }
+
+    /// Fold tool results into the matching assistant tool-call chip instead of a separate row.
+    private func absorb(_ msg: ChatMessage) {
+        if msg.isToolResult, let tr = msg.toolResult {
+            if mergeToolResult(tr) { return }
+        }
+        messages.append(msg)
+    }
+
+    private func mergeToolResult(_ tr: ChatToolResult) -> Bool {
+        for i in messages.indices.reversed() {
+            guard messages[i].isAssistant else { continue }
+            let idx: Int? = {
+                if let tid = tr.toolCallId, !tid.isEmpty,
+                   let j = messages[i].toolCalls.firstIndex(where: { $0.id == tid }) { return j }
+                return messages[i].toolCalls.firstIndex(where: { $0.resultPreview == nil && $0.name == tr.toolName })
+            }()
+            guard let j = idx else { continue }
+            messages[i].toolCalls[j].resultPreview = tr.preview
+            messages[i].toolCalls[j].isError = tr.isError
+            return true
+        }
+        return false
     }
 
     private func commitRawMessage(_ m: [String: Any]) {
@@ -238,7 +325,7 @@ final class ChatViewModel {
             return
         }
         guard let msg = ChatMessage.fromRawMessage(m, id: "m-\(committedCount)") else { return }
-        messages.append(msg)
+        absorb(msg)
         committedCount += 1
     }
 }

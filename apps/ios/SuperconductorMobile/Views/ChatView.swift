@@ -22,6 +22,7 @@ struct ChatView: View {
 
     @State private var draft = ""
     @State private var isSending = false
+    @State private var showModelPicker = false
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -49,6 +50,9 @@ struct ChatView: View {
         .background(Color(uiColor: .systemBackground))
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerSheet(model: model)
+        }
         .task { model.start() }
         .onDisappear { model.stop() }
         .onChange(of: model.notPi) { _, isNotPi in if isNotPi { onNotPi?() } }
@@ -85,21 +89,33 @@ struct ChatView: View {
     @ViewBuilder
     private func footerPills(_ f: AgentFooter) -> some View {
         HStack(spacing: 6) {
-            if let m = f.model { pill(text: m, system: "cpu") }
-            if let ctx = f.contextPct { pill(text: "ctx \(ctx)%", system: "gauge.with.dots.needle.50percent") }
+            if model.canSwitchModel {
+                Button { showModelPicker = true } label: {
+                    pillLabel(text: f.model ?? "Model", system: "cpu", showChevron: true)
+                }
+                .buttonStyle(.plain)
+            } else if let m = f.model {
+                pillLabel(text: m, system: "cpu")
+            }
+            if let ctx = f.contextPct { pill(text: "\(ctx)%", system: "gauge.with.dots.needle.50percent") }
             if let cost = f.cost { pill(text: "$\(cost)", system: nil) }
         }
         .lineLimit(1)
     }
 
-    private func pill(text: String, system: String?) -> some View {
+    private func pillLabel(text: String, system: String?, showChevron: Bool = false) -> some View {
         HStack(spacing: 3) {
             if let system { Image(systemName: system).font(.system(size: 9)) }
-            Text(text).font(.caption2.weight(.medium))
+            Text(text).font(.caption2.weight(.medium)).lineLimit(1)
+            if showChevron { Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)) }
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 7).padding(.vertical, 3)
         .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
+    }
+
+    private func pill(text: String, system: String?) -> some View {
+        pillLabel(text: text, system: system)
     }
 
     private var composer: some View {
@@ -140,8 +156,8 @@ private struct MessageRow: View {
                     .foregroundStyle(.white)
                     .textSelection(.enabled)
             }
-        } else if message.isToolResult, let r = message.toolResult {
-            ToolResultView(result: r)
+        } else if message.isToolResult {
+            EmptyView()
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 if let thinking = message.thinking, !thinking.isEmpty {
@@ -183,50 +199,40 @@ private struct ToolCallChip: View {
     let call: ChatToolCall
     @State private var expanded = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Button { withAnimation { expanded.toggle() } } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "wrench.and.screwdriver.fill").font(.caption2)
+                    if call.hasResult {
+                        Image(systemName: call.isError ? "xmark.octagon.fill" : "checkmark.circle.fill")
+                            .font(.caption2).foregroundStyle(call.isError ? .red : .green)
+                    } else {
+                        Image(systemName: "wrench.and.screwdriver.fill").font(.caption2)
+                    }
                     Text(call.name).font(.caption.weight(.semibold).monospaced())
+                    if !call.hasResult {
+                        ProgressView().controlSize(.mini)
+                    }
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2)
                     Spacer(minLength: 0)
                 }
                 .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            if expanded, !call.argsPreview.isEmpty {
-                Text(call.argsPreview).font(.caption2.monospaced()).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            if expanded {
+                if !call.argsPreview.isEmpty {
+                    Text("Request").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                    Text(call.argsPreview).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }
+                if let out = call.resultPreview, !out.isEmpty {
+                    Text("Output").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                    Text(out).font(.caption2.monospaced())
+                        .foregroundStyle(call.isError ? .red : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                }
             }
         }
         .padding(10)
         .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
-private struct ToolResultView: View {
-    let result: ChatToolResult
-    @State private var expanded = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button { withAnimation { expanded.toggle() } } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: result.isError ? "xmark.octagon.fill" : "checkmark.circle.fill")
-                        .font(.caption2).foregroundStyle(result.isError ? .red : .green)
-                    Text(result.toolName).font(.caption.weight(.medium).monospaced())
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2)
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            if expanded, !result.preview.isEmpty {
-                Text(result.preview).font(.caption2.monospaced())
-                    .foregroundStyle(result.isError ? .red : .secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-            }
-        }
-        .padding(10)
-        .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
