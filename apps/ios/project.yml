@@ -1,0 +1,39 @@
+name: SuperconductorMobile
+options:
+  bundleIdPrefix: engineering.super
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: "8SP9G4G36N"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+targets:
+  SuperconductorMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: SuperconductorMobile
+        excludes:
+          - "Assets.xcassets/AppIcon.appiconset/**"
+    resources:
+      - path: SuperconductorMobile/AppIcon.icon
+        type: folder
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_BUNDLE_IDENTIFIER: engineering.super.mobile
+        INFOPLIST_KEY_CFBundleDisplayName: Superconductor
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: SuperconductorMobile/Info.plist
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to the Superconductor bridge on your Mac on the local network or Tailscale.
+        INFOPLIST_KEY_NSCameraUsageDescription: Scan the QR code shown by the Superconductor Mac companion app to pair automatically.
+        INFOPLIST_KEY_CFBundleURLTypes: "[{CFBundleURLSchemes:['superconductor-mobile'],CFBundleURLName:'engineering.super.mobile.pairing',CFBundleURLIconFile:''}]"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
+        TARGETED_DEVICE_FAMILY: "1"

@@ -1,0 +1,17 @@
+node_modules/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+apps/ios/*.xcodeproj
+apps/ios/*.xcworkspace
+apps/mac/*.xcodeproj
+apps/mac/*.xcworkspace
+apps/mac/bridge-server
+DerivedData/
+.build/companion-derived/
+.env
+# build artifacts
+*.bun-build
+.build/
+apps/ios/build/
+apps/mac/**/*.xcodeproj

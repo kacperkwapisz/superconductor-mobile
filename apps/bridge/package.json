@@ -1,0 +1,17 @@
+{
+  "name": "@superconductor-mobile/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/server.ts",
+    "start": "bun run src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "pairing": "bun run src/print-pairing.ts",
+    "build:standalone": "bun build src/server.ts --compile --target=bun-darwin-arm64 --outfile ../../apps/mac/bridge-server"
+  },
+  "dependencies": {
+    "@superconductor-mobile/protocol": "workspace:*",
+    "@superconductor-mobile/sc-client": "workspace:*"
+  }
+}

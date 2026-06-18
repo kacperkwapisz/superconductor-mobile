@@ -1,0 +1,17 @@
+{
+  "name": "superconductor-mobile",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "bridge": "bun run --cwd apps/bridge dev",
+    "bridge:start": "bun run --cwd apps/bridge start",
+    "bridge:standalone": "bun run --cwd apps/bridge build:standalone",
+    "typecheck": "bun run --cwd apps/bridge typecheck",
+    "companion:build-bridge": "bun run bridge:standalone",
+    "companion:install": "bash apps/mac/build-companion.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
