@@ -1,5 +1,19 @@
 import SwiftUI
 
+/// Markdown parsing is expensive; cache by source string so scrolling never re-parses.
+private enum MarkdownCache {
+    static var store: [String: AttributedString] = [:]
+    static func get(_ s: String) -> AttributedString {
+        if let hit = store[s] { return hit }
+        let parsed = (try? AttributedString(markdown: s, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        ))) ?? AttributedString(s)
+        if store.count > 1500 { store.removeAll(keepingCapacity: true) }
+        store[s] = parsed
+        return parsed
+    }
+}
+
 struct ChatView: View {
     @State var model: ChatViewModel
     var title: String
@@ -23,8 +37,11 @@ struct ChatView: View {
                     }
                     .padding(16)
                 }
-                .onChange(of: model.displayMessages.count) { _, _ in scrollToBottom(proxy) }
-                .onChange(of: model.streamingText) { _, _ in scrollToBottom(proxy) }
+                .onChange(of: model.displayMessages.count) { old, new in
+                    // Animate small deltas (a reply landing); jump instantly for bulk backlog loads.
+                    scrollToBottom(proxy, animated: new - old <= 2)
+                }
+                .onChange(of: model.streamingText) { _, _ in scrollToBottom(proxy, animated: false) }
             }
 
             composer
@@ -41,8 +58,12 @@ struct ChatView: View {
         )) { Button("OK", role: .cancel) {} } message: { Text(model.lastError ?? "") }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+        } else {
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
     }
 
     private var header: some View {
@@ -119,11 +140,7 @@ private struct MessageRow: View {
         }
     }
 
-    private func markdown(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        ))) ?? AttributedString(s)
-    }
+    private func markdown(_ s: String) -> AttributedString { MarkdownCache.get(s) }
 }
 
 private struct ThinkingView: View {

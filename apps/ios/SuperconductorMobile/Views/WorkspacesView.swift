@@ -179,7 +179,7 @@ struct WorkspacesView: View {
 
     private func letterTile(_ project: ProjectNode) -> some View {
         ZStack {
-            project.accent.opacity(0.9)
+            project.tileColor
             Text(String(project.name.prefix(1)).uppercased())
                 .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
         }

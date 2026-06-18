@@ -5,12 +5,13 @@ import { loadOrCreateConfig, configPath } from "./config.ts";
 import { networkInterfaces, homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { spawn } from "node:child_process";
 import { isSafeSessionPath, parseTranscript } from "./transcript.ts";
 import { spawnRpcAgent, getRpcAgent, listRpcAgents, stopRpcAgent } from "./rpc-manager.ts";
 
 const VERSION = "0.1.0";
+const TRANSCRIPT_LIMIT = 250; // most-recent messages sent to the phone (huge sessions stay snappy)
 
 type WsData =
   | { kind: "terminal"; target: string; worktree?: string; subscription?: { stop: () => void } }
@@ -239,7 +240,8 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
         return resolveSessionId(target, url.searchParams.get("worktree") ?? undefined)
           .then(async (sid) => {
             if (!sid || !isSafeSessionPath(sid)) return json({ kind: "not_pi" });
-            const messages = await parseTranscript(sid);
+            const all = await parseTranscript(sid);
+            const messages = all.slice(-TRANSCRIPT_LIMIT);
             return json({ kind: "transcript", response: { session_id: sid, messages } });
           })
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
@@ -554,15 +556,16 @@ async function openTranscriptStream(
     return;
   }
   const path = sid;
-  let sent = 0;
+  let sent = -1; // -1 = not yet initialized
   let pushing = false;
   const push = async () => {
     if (pushing) return;
     pushing = true;
     try {
       const messages = await parseTranscript(path);
-      if (messages.length > sent) {
-        ws.send(JSON.stringify({ kind: "transcript_append", messages: messages.slice(sent) }));
+      const start = sent < 0 ? Math.max(0, messages.length - TRANSCRIPT_LIMIT) : sent;
+      if (sent < 0 || messages.length > sent) {
+        ws.send(JSON.stringify({ kind: "transcript_append", messages: messages.slice(start) }));
         sent = messages.length;
       }
     } catch { /* file briefly unreadable during write */ } finally {
@@ -570,9 +573,19 @@ async function openTranscriptStream(
     }
   };
   await push(); // initial backlog
+  // Coalesce rapid writes: an active turn appends many lines/sec; one push per 250ms is plenty.
+  const base = basename(path);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = () => {
+    if (timer) return;
+    timer = setTimeout(() => { timer = null; void push(); }, 250);
+  };
   try {
     // Watch the directory (not the file): handles sessions whose .jsonl doesn't exist yet.
-    data.watcher = watch(dirname(path), () => { void push(); });
+    data.watcher = watch(dirname(path), (_evt, filename) => {
+      if (filename && filename !== base) return; // ignore other sessions in the same dir
+      schedule();
+    });
   } catch (e) {
     ws.send(JSON.stringify({ kind: "bridge_error", message: formatErr(e).message }));
   }

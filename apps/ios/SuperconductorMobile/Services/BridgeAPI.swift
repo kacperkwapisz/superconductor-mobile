@@ -59,6 +59,7 @@ enum BridgeAPI {
         let encoded = AgentTargetEncoding.encode(target)
         let url = withWorktree(BridgeURL.v1(connection, path: BridgeURL.agentPath(encodedTarget: encoded, suffix: "/send")), worktree)
         var req = URLRequest(url: url)
+        req.timeoutInterval = 20
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")

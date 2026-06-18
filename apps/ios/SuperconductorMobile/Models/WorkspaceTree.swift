@@ -28,9 +28,16 @@ struct ProjectNode: Identifiable, Decodable, Equatable {
     }
 
     /// Project accent from the hue Superconductor stores ("0"..."360").
+    /// Bright accent for small dots/icons (reads on both light and dark backgrounds).
     var accent: Color {
         guard let color, let hue = Double(color) else { return .accentColor }
         return Color(hue: hue / 360.0, saturation: 0.62, brightness: 0.95)
+    }
+
+    /// Darker, saturated fill for the avatar tile so white text always has contrast.
+    var tileColor: Color {
+        guard let color, let hue = Double(color) else { return .accentColor }
+        return Color(hue: hue / 360.0, saturation: 0.74, brightness: 0.58)
     }
 }
 
