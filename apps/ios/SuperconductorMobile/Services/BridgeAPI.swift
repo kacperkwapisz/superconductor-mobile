@@ -122,6 +122,19 @@ enum BridgeAPI {
         return decoded.response.id
     }
 
+    /// Pi's status footer (model / branch / cost / context%) parsed from the terminal snapshot.
+    static func fetchFooter(connection: BridgeConnection, target: String, worktree: String? = nil) async -> AgentFooter? {
+        let encoded = AgentTargetEncoding.encode(target)
+        let url = withWorktree(BridgeURL.v1(connection, path: BridgeURL.agentPath(encodedTarget: encoded, suffix: "/footer")), worktree)
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        guard let (data, resp) = try? await BridgeURLSession.http.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let env = try? JSONDecoder().decode(FooterEnvelope.self, from: data) else { return nil }
+        return env.response.isEmpty ? nil : env.response
+    }
+
     static func stopRpcAgent(connection: BridgeConnection, rpcId: String) async {
         let url = BridgeURL.v1(connection, path: "/v1/rpc/agents/\(rpcId)/stop")
         var req = URLRequest(url: url)
@@ -135,6 +148,8 @@ private struct RpcAgentEnvelope: Decodable {
     var response: RpcAgentDTO
     struct RpcAgentDTO: Decodable { var id: String }
 }
+
+private struct FooterEnvelope: Decodable { var response: AgentFooter }
 
 enum BridgeAPIError: Error, LocalizedError {
     case http(Int)

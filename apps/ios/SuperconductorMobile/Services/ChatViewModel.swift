@@ -22,6 +22,7 @@ final class ChatViewModel {
     private(set) var isStreaming = false
     private(set) var isConnected = false
     private(set) var notPi = false
+    private(set) var footer: AgentFooter?
     var lastError: String?
 
     private let mode: Mode
@@ -31,6 +32,7 @@ final class ChatViewModel {
     private var committedCount = 0  // for stable ids
     private var didInitialBacklog = false
     private var quietTask: Task<Void, Never>?  // transcript: clear "Working…" after a lull
+    private var footerTask: Task<Void, Never>?
 
     var canSend: Bool {
         switch mode {
@@ -75,6 +77,7 @@ final class ChatViewModel {
                 url = c.url ?? url
             }
             openSocket(url)
+            startFooterPolling(target: target, worktree: worktree)
             return
         case let .rpc(rpcId):
             path = "/v1/rpc/agents/\(rpcId)/stream"
@@ -92,7 +95,20 @@ final class ChatViewModel {
         receiveTask = Task { await receiveLoop() }
     }
 
+    private func startFooterPolling(target: String, worktree: String?) {
+        footerTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                if let f = await BridgeAPI.fetchFooter(connection: self.connection, target: target, worktree: worktree) {
+                    self.footer = f
+                }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+
     func stop() {
+        footerTask?.cancel(); footerTask = nil
         quietTask?.cancel(); quietTask = nil
         receiveTask?.cancel(); receiveTask = nil
         task?.cancel(with: .goingAway, reason: nil); task = nil

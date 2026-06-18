@@ -67,16 +67,39 @@ struct ChatView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Circle()
                 .fill(model.isStreaming ? Color.green : (model.isConnected ? Color.blue : Color.orange))
                 .frame(width: 7, height: 7)
             Text(model.isStreaming ? "Working…" : (model.isConnected ? "Live" : "Connecting"))
                 .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            Spacer()
+            Spacer(minLength: 8)
+            if let f = model.footer {
+                footerPills(f)
+            }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(.bar)
+    }
+
+    @ViewBuilder
+    private func footerPills(_ f: AgentFooter) -> some View {
+        HStack(spacing: 6) {
+            if let m = f.model { pill(text: m, system: "cpu") }
+            if let ctx = f.contextPct { pill(text: "ctx \(ctx)%", system: "gauge.with.dots.needle.50percent") }
+            if let cost = f.cost { pill(text: "$\(cost)", system: nil) }
+        }
+        .lineLimit(1)
+    }
+
+    private func pill(text: String, system: String?) -> some View {
+        HStack(spacing: 3) {
+            if let system { Image(systemName: system).font(.system(size: 9)) }
+            Text(text).font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
     }
 
     private var composer: some View {

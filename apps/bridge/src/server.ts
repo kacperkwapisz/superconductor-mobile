@@ -8,6 +8,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { spawn } from "node:child_process";
 import { isSafeSessionPath, parseTranscript } from "./transcript.ts";
+import { parseFooter } from "./footer.ts";
 import { spawnRpcAgent, getRpcAgent, listRpcAgents, stopRpcAgent } from "./rpc-manager.ts";
 
 const VERSION = "0.1.0";
@@ -244,6 +245,16 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
             const messages = all.slice(-TRANSCRIPT_LIMIT);
             return json({ kind: "transcript", response: { session_id: sid, messages } });
           })
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+      const footerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/footer$/);
+      if (footerMatch && req.method === "GET") {
+        const target = decodeTarget(footerMatch[1]!);
+        return scJson<{ response?: { targets?: { lines?: string[] }[] } }>([
+          "agent", "read", "--to", target, "--last", "160", ...worktreeArgs(url), "--output", "json",
+        ])
+          .then((body) => json({ kind: "footer", response: parseFooter(body.response?.targets?.[0]?.lines ?? []) ?? {} }))
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
       }
 

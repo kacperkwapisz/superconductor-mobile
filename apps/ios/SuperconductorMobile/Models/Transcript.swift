@@ -1,5 +1,15 @@
 import Foundation
 
+struct AgentFooter: Decodable, Equatable {
+    var model: String?
+    var branch: String?
+    var cost: String?
+    var contextPct: Int?
+    var time: String?
+
+    var isEmpty: Bool { model == nil && branch == nil && cost == nil && contextPct == nil }
+}
+
 struct ChatToolCall: Identifiable, Equatable {
     var id: String
     var name: String
