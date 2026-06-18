@@ -79,17 +79,40 @@ struct AgentLeaf: Identifiable, Decodable, Equatable {
     var providerKey: String
     var state: String
     var capabilities: AgentLeafCaps?
+    var label: String?
+    var selector: String?
+    var ui: String?
+    var tabTitleFromHost: String?
 
     var id: String { target }
 
     enum CodingKeys: String, CodingKey {
         case target, state
         case providerKey = "provider_key"
-        case capabilities
+        case capabilities, label, selector, ui
+        case tabTitleFromHost = "tab_title"
     }
 
     var isInteractive: Bool {
         (capabilities?.send ?? false) && (capabilities?.subscribe ?? false)
+    }
+
+    /// Tab number parsed from a selector like "view:1/tab:2/pane:1".
+    var tabNumber: Int? {
+        guard let selector, let r = selector.range(of: "tab:") else { return nil }
+        let rest = selector[r.upperBound...].prefix { $0.isNumber }
+        return Int(rest)
+    }
+
+    /// Human tab title: Superconductor's own tab title, else label, else provider.
+    var tabTitle: String {
+        if let t = tabTitleFromHost, !t.isEmpty { return t }
+        if let label, !label.isEmpty { return label }
+        switch providerKey {
+        case "pi": return "Pi"
+        case "terminal": return "Shell"
+        default: return providerKey.capitalized
+        }
     }
 
     /// Build the AgentRow the session view consumes.

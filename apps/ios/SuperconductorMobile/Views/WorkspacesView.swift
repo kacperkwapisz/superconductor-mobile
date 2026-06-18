@@ -3,6 +3,11 @@ import SwiftUI
 struct WorkspacesView: View {
     @Environment(AppSession.self) private var session
     @State private var collapsed: Set<String> = []
+    @State private var expandedWorktrees: Set<String> = []
+    @State private var pendingRpc: RpcSession?
+    @State private var launching = false
+
+    struct RpcSession: Identifiable, Hashable { var id: String; var title: String }
 
     private var selectedWorkspace: WorkspaceNode? {
         session.workspaces.first { $0.id == session.selectedWorkspaceId } ?? session.workspaces.first
@@ -27,6 +32,11 @@ struct WorkspacesView: View {
             .navigationTitle("Superconductor")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: AgentRow.self) { AgentSessionView(agent: $0) }
+            .navigationDestination(item: $pendingRpc) { rpc in
+                if let c = session.connection {
+                    ChatView(model: ChatViewModel(mode: .rpc(rpcId: rpc.id), connection: c), title: rpc.title)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }
@@ -177,35 +187,97 @@ struct WorkspacesView: View {
 
     @ViewBuilder
     private func worktreeRow(project: ProjectNode, wt: WorktreeNode) -> some View {
-        let agent = wt.agents.first(where: \.isInteractive)
-        let row = HStack(spacing: 8) {
+        let agents = wt.agents
+        let multi = agents.count > 1
+        let expanded = expandedWorktrees.contains(wt.path)
+        let header = HStack(spacing: 8) {
             Text(wt.displayName)
                 .font(.subheadline)
-                .foregroundStyle(agent != nil ? .primary : .secondary)
+                .foregroundStyle(agents.isEmpty ? .secondary : .primary)
                 .lineLimit(1).truncationMode(.tail)
             if wt.isMain {
                 Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
             Spacer(minLength: 6)
-            trailing(wt: wt, agent: agent)
+            if multi {
+                Text("\(agents.count) tabs").font(.caption2).foregroundStyle(.secondary)
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+            }
+            worktreeStatus(wt: wt)
         }
         .padding(.leading, 53).padding(.trailing, 16).padding(.vertical, 7)
         .contentShape(Rectangle())
 
-        if let agent {
-            NavigationLink(value: agent.toAgentRow(title: wt.displayName, worktreePath: wt.path)) { row }
+        Group {
+            if multi {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        if expanded { expandedWorktrees.remove(wt.path) } else { expandedWorktrees.insert(wt.path) }
+                    }
+                } label: { header }.buttonStyle(.plain)
+            } else if let agent = agents.first {
+                NavigationLink(value: agent.toAgentRow(title: wt.displayName, worktreePath: wt.path)) { header }
+                    .buttonStyle(.plain)
+            } else {
+                header
+            }
+        }
+        .contextMenu {
+            Button("Start live agent", systemImage: "bolt.fill") {
+                Task { await startLive(path: wt.path, title: wt.displayName) }
+            }
+        }
+
+        if multi, expanded {
+            ForEach(agents) { a in
+                NavigationLink(value: a.toAgentRow(title: a.tabTitle, worktreePath: wt.path)) {
+                    tabRow(a)
+                }
                 .buttonStyle(.plain)
-        } else {
-            row
+            }
         }
     }
 
     @ViewBuilder
-    private func trailing(wt: WorktreeNode, agent: AgentLeaf?) -> some View {
+    private func tabRow(_ a: AgentLeaf) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: a.providerKey == "pi" ? "sparkle" : "terminal")
+                .font(.caption2).foregroundStyle(a.providerKey == "pi" ? Color.accentColor : .secondary)
+            Text(a.tabTitle)
+                .font(.caption).foregroundStyle(.primary)
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 6)
+            if a.state == "working" || a.state == "running" {
+                Image(systemName: "play.fill").font(.system(size: 8)).foregroundStyle(.green)
+            } else if a.state == "review" {
+                Circle().fill(.orange).frame(width: 6, height: 6)
+            }
+        }
+        .padding(.leading, 72).padding(.trailing, 16).padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+
+    private func startLive(path: String, title: String) async {
+        guard let c = session.connection, !launching else { return }
+        launching = true
+        defer { launching = false }
+        do {
+            let id = try await BridgeAPI.startRpcAgent(connection: c, worktree: path, name: title)
+            pendingRpc = RpcSession(id: id, title: title)
+        } catch {
+            session.lastError = error.localizedDescription
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeStatus(wt: WorktreeNode) -> some View {
+        let working = wt.agents.contains { $0.state == "working" || $0.state == "running" }
+        let review = wt.agents.contains { $0.state == "review" }
         HStack(spacing: 7) {
-            if let agent, agent.state == "working" || agent.state == "running" {
+            if working {
                 Image(systemName: "play.fill").font(.system(size: 9)).foregroundStyle(.green)
-            } else if let agent, agent.state == "review" {
+            } else if review {
                 Circle().fill(.orange).frame(width: 7, height: 7)
             }
             if let t = wt.relativeTime {

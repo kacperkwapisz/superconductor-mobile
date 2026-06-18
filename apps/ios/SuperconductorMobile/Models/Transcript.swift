@@ -1,0 +1,97 @@
+import Foundation
+
+struct ChatToolCall: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var argsPreview: String
+}
+
+struct ChatToolResult: Equatable {
+    var toolName: String
+    var isError: Bool
+    var preview: String
+}
+
+struct ChatMessage: Identifiable, Equatable {
+    var id: String
+    var role: String          // user | assistant | toolResult | system | custom
+    var text: String?
+    var thinking: String?
+    var toolCalls: [ChatToolCall] = []
+    var toolResult: ChatToolResult?
+    var isStreaming: Bool = false
+
+    var isUser: Bool { role == "user" }
+    var isAssistant: Bool { role == "assistant" }
+    var isToolResult: Bool { role == "toolResult" }
+}
+
+/// Decodes the bridge's compact transcript schema (A: `/transcript/stream`).
+struct ChatMessageDTO: Decodable {
+    var role: String
+    var text: String?
+    var thinking: String?
+    var toolCalls: [ToolCallDTO]?
+    var toolResult: ToolResultDTO?
+
+    struct ToolCallDTO: Decodable { var id: String; var name: String; var argsPreview: String }
+    struct ToolResultDTO: Decodable { var toolName: String; var isError: Bool; var preview: String }
+
+    func toMessage(id: String) -> ChatMessage {
+        ChatMessage(
+            id: id,
+            role: role,
+            text: text,
+            thinking: thinking,
+            toolCalls: (toolCalls ?? []).map { ChatToolCall(id: $0.id, name: $0.name, argsPreview: $0.argsPreview) },
+            toolResult: toolResult.map { ChatToolResult(toolName: $0.toolName, isError: $0.isError, preview: $0.preview) }
+        )
+    }
+}
+
+extension ChatMessage {
+    /// Maps a raw Pi `message` object (B: RPC `message_end` events) to a ChatMessage.
+    static func fromRawMessage(_ m: [String: Any], id: String) -> ChatMessage? {
+        guard let role = m["role"] as? String else { return nil }
+        var texts: [String] = []
+        var thinks: [String] = []
+        var calls: [ChatToolCall] = []
+
+        if let s = m["content"] as? String {
+            texts.append(s)
+        } else if let blocks = m["content"] as? [[String: Any]] {
+            for b in blocks {
+                switch b["type"] as? String {
+                case "text": if let t = b["text"] as? String { texts.append(t) }
+                case "thinking":
+                    if let t = b["text"] as? String { thinks.append(t) }
+                    else if let t = b["thinking"] as? String { thinks.append(t) }
+                case "toolCall":
+                    let args: String
+                    if let a = b["arguments"] as? String { args = a }
+                    else if let a = b["arguments"], let d = try? JSONSerialization.data(withJSONObject: a),
+                            let s = String(data: d, encoding: .utf8) { args = s }
+                    else { args = "" }
+                    calls.append(ChatToolCall(id: (b["id"] as? String) ?? "", name: (b["name"] as? String) ?? "tool", argsPreview: args))
+                default: break
+                }
+            }
+        }
+
+        if role == "toolResult" {
+            return ChatMessage(
+                id: id, role: role,
+                toolResult: ChatToolResult(
+                    toolName: (m["toolName"] as? String) ?? "tool",
+                    isError: (m["isError"] as? Bool) ?? false,
+                    preview: texts.joined(separator: "\n")
+                )
+            )
+        }
+
+        let text = texts.isEmpty ? nil : texts.joined(separator: "\n")
+        let thinking = thinks.isEmpty ? nil : thinks.joined(separator: "\n")
+        if text == nil, thinking == nil, calls.isEmpty { return nil }
+        return ChatMessage(id: id, role: role, text: text, thinking: thinking, toolCalls: calls)
+    }
+}

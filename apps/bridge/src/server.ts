@@ -4,12 +4,47 @@ import type { PairingPayload } from "@superconductor-mobile/protocol";
 import { loadOrCreateConfig, configPath } from "./config.ts";
 import { networkInterfaces, homedir } from "node:os";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { watch, type FSWatcher } from "node:fs";
+import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
+import { isSafeSessionPath, parseTranscript } from "./transcript.ts";
+import { spawnRpcAgent, getRpcAgent, listRpcAgents, stopRpcAgent } from "./rpc-manager.ts";
 
 const VERSION = "0.1.0";
 
-type WsData = { target: string; worktree?: string; subscription?: { stop: () => void } };
+type WsData =
+  | { kind: "terminal"; target: string; worktree?: string; subscription?: { stop: () => void } }
+  | { kind: "transcript"; target: string; worktree?: string; watcher?: FSWatcher }
+  | { kind: "rpc"; rpcId: string; detach?: () => void };
+
+// Pi agents persist a structured JSONL transcript; sc reports it as session_id, which is
+// EITHER a full .jsonl path OR a bare session uuid (e.g. "019edc39-..."). Resolve to a file.
+async function resolveSessionId(target: string, worktree?: string): Promise<string | null> {
+  const args = ["agent", "read", "--to", target, "--last", "1"];
+  if (worktree) args.push("--worktree", worktree);
+  args.push("--output", "json");
+  const body = await scJson<{ response?: { targets?: { session_id?: string }[] } }>(args);
+  const sid = body.response?.targets?.[0]?.session_id;
+  if (!sid) return null;
+  if (sid.startsWith("/")) return sid.endsWith(".jsonl") ? sid : null;
+  // Bare session uuid: session.json maps tab.session_id -> tab.session_path (authoritative).
+  return findSessionPathBySessionId(sid);
+}
+
+async function findSessionPathBySessionId(sessionId: string): Promise<string | null> {
+  let session: { selections?: Selection[] };
+  try {
+    session = await readJson<{ selections?: Selection[] }>("session.json");
+  } catch {
+    return null;
+  }
+  for (const sel of session.selections ?? []) {
+    for (const t of sel.value?.tabs ?? []) {
+      if (t.session_id === sessionId && typeof t.session_path === "string") return t.session_path;
+    }
+  }
+  return null;
+}
 
 function decodeTarget(encoded: string): string {
   return decodeURIComponent(encoded);
@@ -197,13 +232,77 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
       }
 
+      // --- A: Pi transcript (mirror existing Mac agents) ---
+      const transcriptMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/transcript$/);
+      if (transcriptMatch && req.method === "GET") {
+        const target = decodeTarget(transcriptMatch[1]!);
+        return resolveSessionId(target, url.searchParams.get("worktree") ?? undefined)
+          .then(async (sid) => {
+            if (!sid || !isSafeSessionPath(sid)) return json({ kind: "not_pi" });
+            const messages = await parseTranscript(sid);
+            return json({ kind: "transcript", response: { session_id: sid, messages } });
+          })
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+      const transcriptStreamMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/transcript\/stream$/);
+      if (transcriptStreamMatch && req.method === "GET") {
+        if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+          const target = decodeTarget(transcriptStreamMatch[1]!);
+          const worktree = url.searchParams.get("worktree") ?? undefined;
+          const ok = server.upgrade(req, { data: { kind: "transcript", target, worktree } satisfies WsData });
+          if (ok) return undefined as unknown as Response;
+          return new Response("WebSocket upgrade failed", { status: 500 });
+        }
+      }
+
+      // --- B: phone-owned RPC agents (true live mode) ---
+      if (url.pathname === "/v1/rpc/agents" && req.method === "GET") {
+        return json({ kind: "rpc_agents", response: { agents: listRpcAgents() } });
+      }
+
+      if (url.pathname === "/v1/rpc/agents" && req.method === "POST") {
+        return req
+          .json()
+          .then((body: { worktree?: string; provider?: string; model?: string; name?: string }) => {
+            if (!body.worktree?.trim()) {
+              return json({ ok: false, error: { code: "validation", message: "worktree required" } }, 400);
+            }
+            const agent = spawnRpcAgent({
+              worktree: body.worktree,
+              provider: body.provider,
+              model: body.model,
+              name: body.name,
+            });
+            return json({ kind: "rpc_agent", response: agent.meta() });
+          })
+          .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
+      }
+
+      const rpcStopMatch = url.pathname.match(/^\/v1\/rpc\/agents\/([^/]+)\/stop$/);
+      if (rpcStopMatch && req.method === "POST") {
+        const ok = stopRpcAgent(rpcStopMatch[1]!);
+        return json({ ok }, ok ? 200 : 404);
+      }
+
+      const rpcStreamMatch = url.pathname.match(/^\/v1\/rpc\/agents\/([^/]+)\/stream$/);
+      if (rpcStreamMatch && req.method === "GET") {
+        if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+          const rpcId = rpcStreamMatch[1]!;
+          if (!getRpcAgent(rpcId)) return new Response("no such agent", { status: 404 });
+          const ok = server.upgrade(req, { data: { kind: "rpc", rpcId } satisfies WsData });
+          if (ok) return undefined as unknown as Response;
+          return new Response("WebSocket upgrade failed", { status: 500 });
+        }
+      }
+
       const streamMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/stream$/);
       if (streamMatch && req.method === "GET") {
         const upgrade = req.headers.get("Upgrade")?.toLowerCase();
         if (upgrade === "websocket") {
           const target = decodeTarget(streamMatch[1]!);
           const worktree = url.searchParams.get("worktree") ?? undefined;
-          const ok = server.upgrade(req, { data: { target, worktree } satisfies WsData });
+          const ok = server.upgrade(req, { data: { kind: "terminal", target, worktree } satisfies WsData });
           if (ok) return undefined as unknown as Response;
           return new Response("WebSocket upgrade failed", { status: 500 });
         }
@@ -213,35 +312,55 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
     },
     websocket: {
       open(ws: ServerWebSocket<WsData>) {
-        const target = ws.data.target;
-        const sub = scSubscribe(
+        const data = ws.data;
+        if (data.kind === "transcript") {
+          void openTranscriptStream(ws, data);
+          return;
+        }
+        if (data.kind === "rpc") {
+          const agent = getRpcAgent(data.rpcId);
+          if (!agent) {
+            ws.send(JSON.stringify({ kind: "bridge_error", message: "rpc agent gone" }));
+            return;
+          }
+          data.detach = agent.attach((event) => ws.send(JSON.stringify(event)));
+          return;
+        }
+        // terminal snapshot stream
+        data.subscription = scSubscribe(
           [
             "agent",
             "subscribe",
             "--to",
-            target,
+            data.target,
             "--live-only",
-            ...(ws.data.worktree ? ["--worktree", ws.data.worktree] : []),
+            ...(data.worktree ? ["--worktree", data.worktree] : []),
             "--output",
             "json",
           ],
           {
             onEvent: (event) => ws.send(JSON.stringify(event)),
-            onError: (err) => {
-              ws.send(JSON.stringify({ kind: "bridge_error", message: err.message }));
-            },
-            onClose: () => {
-              /* sc process ended */
-            },
+            onError: (err) => ws.send(JSON.stringify({ kind: "bridge_error", message: err.message })),
+            onClose: () => {},
           },
         );
-        ws.data.subscription = sub;
       },
       close(ws: ServerWebSocket<WsData>) {
-        ws.data.subscription?.stop();
+        const data = ws.data;
+        if (data.kind === "terminal") data.subscription?.stop();
+        else if (data.kind === "transcript") data.watcher?.close();
+        else if (data.kind === "rpc") data.detach?.();
       },
-      message() {
-        /* client → server not used in v1 */
+      message(ws: ServerWebSocket<WsData>, raw) {
+        // Only RPC agents accept client commands (prompt / steer / follow_up / interrupt).
+        if (ws.data.kind !== "rpc") return;
+        const agent = getRpcAgent(ws.data.rpcId);
+        if (!agent) return;
+        let cmd: unknown;
+        try { cmd = JSON.parse(typeof raw === "string" ? raw : raw.toString()); } catch { return; }
+        if (cmd && typeof cmd === "object" && typeof (cmd as { type?: unknown }).type === "string") {
+          agent.send(cmd as Record<string, unknown>);
+        }
       },
     },
   });
@@ -285,7 +404,7 @@ type ProjectUIState = {
 };
 type SettingsProject = { id: string; name: string; main_repo_path?: string; ui_state?: ProjectUIState };
 type SettingsWorkspace = { id: string; name: string; project_ids: string[] };
-type Selection = { key?: { project_id?: string; worktree_name?: string }; value?: { tabs?: { working_directory_path?: string }[] } };
+type Selection = { key?: { project_id?: string; worktree_name?: string }; value?: { tabs?: { working_directory_path?: string; title?: string; session_id?: string; session_path?: string }[] } };
 
 async function readJson<T>(...parts: string[]): Promise<T> {
   return JSON.parse(await readFile(join(homedir(), ".superconductor", ...parts), "utf8")) as T;
@@ -314,12 +433,14 @@ async function gatherLiveAgents(): Promise<{
   settings: { projects: SettingsProject[]; workspaces: SettingsWorkspace[]; active_workspace_id?: string };
   worktreesByProject: Map<string, Worktree[]>;
   agentsByPath: Map<string, RawAgent[]>;
+  tabTitlesByPath: Map<string, (string | null)[]>;
 }> {
   const settings = await readJson<{ projects: SettingsProject[]; workspaces: SettingsWorkspace[]; active_workspace_id?: string }>("settings.json");
   const session = await readJson<{ selections?: Selection[] }>("session.json");
   const projectById = new Map(settings.projects.map((p) => [p.id, p]));
 
   const worktreesByProject = new Map<string, Worktree[]>();
+  const tabTitlesByPath = new Map<string, (string | null)[]>();
   const queryPaths = new Set<string>();
   for (const sel of session.selections ?? []) {
     const pid = sel.key?.project_id;
@@ -331,6 +452,8 @@ async function gatherLiveAgents(): Promise<{
     if (!worktreesByProject.has(pid)) worktreesByProject.set(pid, []);
     const list = worktreesByProject.get(pid)!;
     if (!list.some((w) => w.path === path)) list.push({ name, path, gitBranch: null });
+    // Tab titles are ordered to match current_selector "tab:N".
+    tabTitlesByPath.set(path, (sel.value?.tabs ?? []).map((t) => t.title ?? null));
     queryPaths.add(path);
   }
 
@@ -346,11 +469,11 @@ async function gatherLiveAgents(): Promise<{
     ...allWorktrees.map((w) => gitBranch(w.path).then((b) => { w.gitBranch = b; })),
   ]);
 
-  return { settings, worktreesByProject, agentsByPath };
+  return { settings, worktreesByProject, agentsByPath, tabTitlesByPath };
 }
 
 async function buildWorkspaceTree() {
-  const { settings, worktreesByProject, agentsByPath } = await gatherLiveAgents();
+  const { settings, worktreesByProject, agentsByPath, tabTitlesByPath } = await gatherLiveAgents();
   const projectById = new Map(settings.projects.map((p) => [p.id, p]));
 
   const workspaces = settings.workspaces.map((ws) => ({
@@ -372,12 +495,22 @@ async function buildWorkspaceTree() {
             git_branch: w.gitBranch,
             display_name: featureLabel ?? w.gitBranch ?? w.name,
             last_interaction_at: usage[w.name]?.last_interaction_at ?? null,
-            agents: (agentsByPath.get(w.path) ?? []).map((a) => ({
-              target: `id:${a.stable_target_id}`,
-              provider_key: a.provider_key,
-              state: a.state,
-              capabilities: a.capabilities,
-            })),
+            agents: (agentsByPath.get(w.path) ?? []).map((a) => {
+              const selector = (a.current_selector as string | null) ?? null;
+              const titles = tabTitlesByPath.get(w.path) ?? [];
+              const idx = selector?.match(/tab:(\d+)/);
+              const tabTitle = idx ? titles[parseInt(idx[1]!, 10) - 1] ?? null : null;
+              return {
+                target: `id:${a.stable_target_id}`,
+                provider_key: a.provider_key,
+                state: a.state,
+                capabilities: a.capabilities,
+                label: (a.label as string | null) ?? null,
+                selector,
+                ui: (a.ui as string | null) ?? null,
+                tab_title: tabTitle,
+              };
+            }),
           };
         });
         return {
@@ -402,6 +535,47 @@ async function serveAvatar(projectId: string): Promise<Response> {
   const file = Bun.file(local);
   if (!(await file.exists())) return new Response("not found", { status: 404 });
   return new Response(file, { headers: { "Content-Type": "image/png", "Cache-Control": "max-age=86400" } });
+}
+
+// A: stream a Pi transcript live by re-parsing the JSONL on each append (files are small).
+async function openTranscriptStream(
+  ws: ServerWebSocket<WsData>,
+  data: Extract<WsData, { kind: "transcript" }>,
+): Promise<void> {
+  let sid: string | null;
+  try {
+    sid = await resolveSessionId(data.target, data.worktree);
+  } catch (e) {
+    ws.send(JSON.stringify({ kind: "bridge_error", message: formatErr(e).message }));
+    return;
+  }
+  if (!sid || !isSafeSessionPath(sid)) {
+    ws.send(JSON.stringify({ kind: "not_pi" }));
+    return;
+  }
+  const path = sid;
+  let sent = 0;
+  let pushing = false;
+  const push = async () => {
+    if (pushing) return;
+    pushing = true;
+    try {
+      const messages = await parseTranscript(path);
+      if (messages.length > sent) {
+        ws.send(JSON.stringify({ kind: "transcript_append", messages: messages.slice(sent) }));
+        sent = messages.length;
+      }
+    } catch { /* file briefly unreadable during write */ } finally {
+      pushing = false;
+    }
+  };
+  await push(); // initial backlog
+  try {
+    // Watch the directory (not the file): handles sessions whose .jsonl doesn't exist yet.
+    data.watcher = watch(dirname(path), () => { void push(); });
+  } catch (e) {
+    ws.send(JSON.stringify({ kind: "bridge_error", message: formatErr(e).message }));
+  }
 }
 
 function formatErr(e: unknown): { code: string; message: string } {

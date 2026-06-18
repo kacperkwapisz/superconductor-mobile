@@ -102,6 +102,37 @@ enum BridgeAPI {
         }
         return first.lines ?? []
     }
+
+    /// Spawn a phone-owned Pi agent in RPC live mode; returns its rpc id.
+    static func startRpcAgent(connection: BridgeConnection, worktree: String, name: String? = nil) async throws -> String {
+        let url = BridgeURL.v1(connection, path: "/v1/rpc/agents")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        var bodyObj: [String: Any] = ["worktree": worktree]
+        if let name { bodyObj["name"] = name }
+        req.httpBody = try JSONSerialization.data(withJSONObject: bodyObj)
+        let (data, resp) = try await BridgeURLSession.http.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw BridgeAPIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        let decoded = try JSONDecoder().decode(RpcAgentEnvelope.self, from: data)
+        return decoded.response.id
+    }
+
+    static func stopRpcAgent(connection: BridgeConnection, rpcId: String) async {
+        let url = BridgeURL.v1(connection, path: "/v1/rpc/agents/\(rpcId)/stop")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
+        _ = try? await BridgeURLSession.http.data(for: req)
+    }
+}
+
+private struct RpcAgentEnvelope: Decodable {
+    var response: RpcAgentDTO
+    struct RpcAgentDTO: Decodable { var id: String }
 }
 
 enum BridgeAPIError: Error, LocalizedError {

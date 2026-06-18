@@ -11,7 +11,43 @@ struct AgentSessionView: View {
 
     private var target: String { agent.bridgeTarget }
 
+    @State private var chatModel: ChatViewModel?
+    @State private var forceRaw = false
+    @State private var fellBack = false
+
     var body: some View {
+        Group {
+            if agent.providerKey == "pi" && !forceRaw && !fellBack {
+                if let chatModel {
+                    ChatView(model: chatModel, title: agent.displayTitle, onNotPi: { fellBack = true })
+                } else {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                terminalSession
+            }
+        }
+        .toolbar {
+            if agent.providerKey == "pi" && !fellBack {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(forceRaw ? "Chat" : "Raw",
+                           systemImage: forceRaw ? "bubble.left.and.bubble.right" : "terminal") {
+                        forceRaw.toggle()
+                    }
+                }
+            }
+        }
+        .task {
+            if agent.providerKey == "pi", chatModel == nil, let c = session.connection {
+                chatModel = ChatViewModel(
+                    mode: .transcript(target: agent.bridgeTarget, worktree: agent.worktreePath),
+                    connection: c
+                )
+            }
+        }
+    }
+
+    private var terminalSession: some View {
         VStack(spacing: 0) {
             sessionHeader
 

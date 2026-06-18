@@ -57,7 +57,7 @@ final class AgentStreamService {
                 }
             } catch {
                 isConnected = false
-                lastStreamError = error.localizedDescription
+                if !Task.isCancelled && !error.isCancellation { lastStreamError = error.localizedDescription }
                 break
             }
         }
