@@ -1,19 +1,5 @@
 import SwiftUI
 
-/// Markdown parsing is expensive; cache by source string so scrolling never re-parses.
-private enum MarkdownCache {
-    static var store: [String: AttributedString] = [:]
-    static func get(_ s: String) -> AttributedString {
-        if let hit = store[s] { return hit }
-        let parsed = (try? AttributedString(markdown: s, options: .init(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        ))) ?? AttributedString(s)
-        if store.count > 1500 { store.removeAll(keepingCapacity: true) }
-        store[s] = parsed
-        return parsed
-    }
-}
-
 struct ChatView: View {
     @State var model: ChatViewModel
     var title: String
@@ -34,15 +20,23 @@ struct ChatView: View {
                         ForEach(model.displayMessages) { msg in
                             MessageRow(message: msg).id(msg.id)
                         }
+                        if model.isStreaming {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Working…").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                            }
+                            .id("working")
+                        }
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(16)
                 }
-                .onChange(of: model.displayMessages.count) { old, new in
+                .onChange(of: model.messages.count) { old, new in
                     // Animate small deltas (a reply landing); jump instantly for bulk backlog loads.
                     scrollToBottom(proxy, animated: new - old <= 2)
                 }
-                .onChange(of: model.streamingText) { _, _ in scrollToBottom(proxy, animated: false) }
+                .onChange(of: model.streamingTick) { _, _ in scrollToBottom(proxy, animated: false) }
+                .onChange(of: model.isStreaming) { _, _ in scrollToBottom(proxy, animated: false) }
             }
 
             composer
@@ -75,7 +69,7 @@ struct ChatView: View {
             Circle()
                 .fill(model.isStreaming ? Color.green : (model.isConnected ? Color.blue : Color.orange))
                 .frame(width: 7, height: 7)
-            Text(model.isStreaming ? "Working…" : (model.isConnected ? "Live" : "Connecting"))
+            Text(model.isConnected ? "Live" : "Connecting")
                 .font(.caption.weight(.medium)).foregroundStyle(.secondary)
             Spacer(minLength: 8)
             if let f = model.footer {
@@ -161,15 +155,10 @@ private struct MessageRow: View {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 if let thinking = message.thinking, !thinking.isEmpty {
-                    ThinkingView(text: thinking)
+                    ThinkingView(text: thinking, streaming: message.isStreaming)
                 }
                 if let text = message.text, !text.isEmpty {
-                    Text(markdown(text))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if message.isStreaming && (message.text?.isEmpty ?? true) {
-                    ProgressView().controlSize(.small)
+                    assistantText(text)
                 }
                 ForEach(message.toolCalls) { call in
                     ToolCallChip(call: call)
@@ -179,14 +168,30 @@ private struct MessageRow: View {
         }
     }
 
-    private func markdown(_ s: String) -> AttributedString { MarkdownCache.get(s) }
+    // Streaming: plain, non-selectable text — selection geometry + markdown of a growing
+    // string is what froze the main thread. Committed: pre-rendered markdown, selectable.
+    @ViewBuilder
+    private func assistantText(_ text: String) -> some View {
+        if message.isStreaming {
+            Text(text).frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(message.attributedText ?? AttributedString(text))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 }
 
 private struct ThinkingView: View {
     let text: String
+    var streaming: Bool = false
     @State private var expanded = false
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
+        // Auto-expanded while streaming so thinking is visible live; collapsible once done.
+        DisclosureGroup(isExpanded: Binding(
+            get: { streaming || expanded },
+            set: { expanded = $0 }
+        )) {
             Text(text).font(.footnote).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         } label: {

@@ -132,7 +132,8 @@ enum BridgeAPI {
         guard let (data, resp) = try? await BridgeURLSession.http.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let env = try? JSONDecoder().decode(FooterEnvelope.self, from: data) else { return nil }
-        return env.response.isEmpty ? nil : env.response
+        // Keep the response even when the pill fields are empty: it still carries `working`.
+        return env.response
     }
 
     static func fetchModels(connection: BridgeConnection, provider: String = "pi") async throws -> [ModelOption] {

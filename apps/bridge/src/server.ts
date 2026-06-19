@@ -288,10 +288,21 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
       const footerMatch = url.pathname.match(/^\/v1\/agents\/([^/]+)\/footer$/);
       if (footerMatch && req.method === "GET") {
         const target = decodeTarget(footerMatch[1]!);
-        return scJson<{ response?: { targets?: { lines?: string[] }[] } }>([
-          "agent", "read", "--to", target, "--last", "160", ...worktreeArgs(url), "--output", "json",
+        const bareId = target.replace(/^id:/, "");
+        return Promise.all([
+          scJson<{ response?: { targets?: { lines?: string[] }[] } }>([
+            "agent", "read", "--to", target, "--last", "160", ...worktreeArgs(url), "--output", "json",
+          ]).then((body) => parseFooter(body.response?.targets?.[0]?.lines ?? []) ?? {}).catch(() => ({})),
+          listAllAgents().catch(() => [] as RawAgent[]),
         ])
-          .then((body) => json({ kind: "footer", response: parseFooter(body.response?.targets?.[0]?.lines ?? []) ?? {} }))
+          .then(([footer, agents]) => {
+            // Real "is the agent working" signal — persists through tool runs until the
+            // turn is actually done, unlike a file-write lull heuristic.
+            const a = agents.find((x) =>
+              x.stable_target_id === bareId || x.current_selector === target || x.current_selector === bareId);
+            const working = !!a && a.state === "working";
+            return json({ kind: "footer", response: { ...footer, working } });
+          })
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
       }
 

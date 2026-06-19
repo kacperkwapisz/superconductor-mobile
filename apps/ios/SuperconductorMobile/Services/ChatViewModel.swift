@@ -18,7 +18,10 @@ final class ChatViewModel {
     }
 
     private(set) var messages: [ChatMessage] = []
-    private(set) var streamingText: String = ""
+    private(set) var streamingMessage: ChatMessage? = nil  // live bubble: text + thinking + tool calls
+    private(set) var streamingTick = 0                     // bumps each flush (cheap scroll trigger)
+    private var pendingPartial: [String: Any]? = nil       // latest full message-so-far
+    private var flushScheduled = false
     private(set) var isStreaming = false
     private(set) var isConnected = false
     private(set) var notPi = false
@@ -72,24 +75,59 @@ final class ChatViewModel {
         }
     }
 
-    /// Committed messages + a live bubble: typed text for RPC, a working spinner for transcript.
+    /// Committed messages + the live bubble (text/thinking/tool calls), when streaming.
     var displayMessages: [ChatMessage] {
-        guard isStreaming else { return messages }
-        let bubble = ChatMessage(
-            id: "streaming", role: "assistant",
-            text: streamingText.isEmpty ? nil : streamingText, isStreaming: true
-        )
-        return messages + [bubble]
+        if isStreaming, let m = streamingMessage { return messages + [m] }
+        return messages
     }
 
-    // Transcript (Mac agent) has no explicit "done" signal; treat a lull in file writes as idle.
-    private func markActivity() {
-        isStreaming = true
+    /// Rebuild the live bubble from the latest `partial` (full message-so-far) ~20x/sec.
+    /// Using the partial — not raw deltas — keeps text, thinking, and tool calls correct
+    /// and in sync, and never leaks thinking/tool-call deltas into the answer text.
+    private func scheduleStreamFlush(_ partial: [String: Any]) {
+        pendingPartial = partial
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let self, let p = self.pendingPartial else { return }
+            self.flushScheduled = false
+            if var m = ChatMessage.fromRawMessage(p, id: "streaming") {
+                m.isStreaming = true
+                self.streamingMessage = m
+                self.streamingTick &+= 1
+            }
+        }
+    }
+
+    private func resetStreaming() {
+        pendingPartial = nil
+        streamingMessage = nil
+    }
+
+    /// Mark the agent as actively working and cancel any pending idle clear.
+    private func markActive() {
+        if !isStreaming { isStreaming = true }
+        quietTask?.cancel(); quietTask = nil
+    }
+
+    /// Clear "Working…" after a grace period; any new activity cancels it. Bridges tool
+    /// runs and inter-turn gaps so the indicator persists until the agent is really done.
+    // ponytail: time-based heuristic; transcript mode has no explicit "done" event.
+    private func markIdleSoon(_ seconds: Double) {
         quietTask?.cancel()
         quietTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(seconds))
             if !Task.isCancelled { self?.isStreaming = false }
         }
+    }
+
+    // Transcript (Mac agent): "Working…" is driven by the polled agent state (startFooterPolling).
+    // markActivity gives instant-on from file writes; the 12s timer is only a safety net in case
+    // polling dies — the poll re-arms it every couple seconds while the agent is working.
+    private func markActivity() {
+        markActive()
+        markIdleSoon(12)
     }
 
     init(mode: Mode, connection: BridgeConnection) {
@@ -144,8 +182,17 @@ final class ChatViewModel {
             while !Task.isCancelled {
                 if let f = await BridgeAPI.fetchFooter(connection: self.connection, target: target, worktree: worktree) {
                     self.footer = f
+                    switch f.working {
+                    case true?:
+                        self.markActivity()              // keep "Working…" alive while the turn runs
+                    case false?:
+                        self.quietTask?.cancel(); self.quietTask = nil
+                        if self.isStreaming { self.isStreaming = false }
+                    default:
+                        break                            // unknown: leave the safety timer to it
+                    }
                 }
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -232,15 +279,18 @@ final class ChatViewModel {
         guard let type = obj["type"] as? String else { return }
         switch type {
         case "agent_start", "turn_start":
-            isStreaming = true
+            markActive()
         case "message_start":
+            // Some RPC servers skip agent_start/turn_start; treat the first assistant
+            // token as the start of work so "Working…" always shows.
             if (obj["message"] as? [String: Any])?["role"] as? String == "assistant" {
-                streamingText = ""
+                markActive()
+                resetStreaming()
             }
         case "message_update":
-            if let ev = obj["assistantMessageEvent"] as? [String: Any],
-               let delta = ev["delta"] as? String {
-                streamingText += delta
+            if let ev = obj["assistantMessageEvent"] as? [String: Any] {
+                markActive()  // cancels any pending idle timer from a prior turn_end
+                if let partial = ev["partial"] as? [String: Any] { scheduleStreamFlush(partial) }
             }
         case "response":
             let cmd = obj["command"] as? String
@@ -266,11 +316,16 @@ final class ChatViewModel {
                 }
                 commitRawMessage(m)
             }
-            streamingText = ""
+            // Assistant message ended, but tools / more turns may follow: stay "Working…".
+            markActive()
+            resetStreaming()
         case "agent_end", "turn_end":
-            isStreaming = false
-            streamingText = ""
+            // Don't drop "Working…" instantly: a multi-turn/tool loop emits turn_end between
+            // turns. Grace period; the next turn_start cancels it, real completion clears it.
+            markIdleSoon(type == "agent_end" ? 0.5 : 3)
+            resetStreaming()
         case "rpc_exit":
+            quietTask?.cancel(); quietTask = nil
             isConnected = false; isStreaming = false
             lastError = "Agent process exited."
         case "rpc_error":
@@ -299,6 +354,21 @@ final class ChatViewModel {
             if mergeToolResult(tr) { return }
         }
         messages.append(msg)
+        if msg.isAssistant, let t = msg.text, !t.isEmpty { scheduleMarkdown(id: msg.id, src: t) }
+    }
+
+    /// Parse markdown off the main thread, then store it on the message. The view shows
+    /// plain text until this lands, so a long reply never blocks the main thread.
+    private func scheduleMarkdown(id: String, src: String) {
+        Task.detached(priority: .utility) { [weak self] in
+            let parsed = (try? AttributedString(markdown: src, options: .init(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(src)
+            await MainActor.run {
+                guard let self, let i = self.messages.firstIndex(where: { $0.id == id }),
+                      self.messages[i].text == src else { return }
+                self.messages[i].attributedText = parsed
+            }
+        }
     }
 
     private func mergeToolResult(_ tr: ChatToolResult) -> Bool {

@@ -11,6 +11,7 @@ struct AgentFooter: Decodable, Equatable {
     var cost: String? = nil
     var contextPct: Int? = nil
     var time: String? = nil
+    var working: Bool? = nil   // live agent state (mirror): true while the turn is running
 
     var isEmpty: Bool { model == nil && branch == nil && cost == nil && contextPct == nil }
 }
@@ -40,6 +41,7 @@ struct ChatMessage: Identifiable, Equatable {
     var toolCalls: [ChatToolCall] = []
     var toolResult: ChatToolResult?
     var isStreaming: Bool = false
+    var attributedText: AttributedString? = nil  // markdown pre-rendered off-main at commit
 
     var isUser: Bool { role == "user" }
     var isAssistant: Bool { role == "assistant" }
