@@ -26,6 +26,8 @@ class RpcAgent {
   private buffer: unknown[] = [];
   private subscribers = new Set<Subscriber>();
   private stdoutBuf = "";
+  private pendingUpdate: unknown | null = null;
+  private updateTimer: ReturnType<typeof setTimeout> | null = null;
   private child: ChildProcessWithoutNullStreams;
 
   constructor(readonly opts: RpcSpawnOptions) {
@@ -64,11 +66,37 @@ class RpcAgent {
     }
   }
 
+  private broadcast(event: unknown) {
+    for (const s of this.subscribers) s(event);
+  }
+
+  // Flush the latest coalesced partial (live subscribers only — partials aren't buffered).
+  private flushPending() {
+    if (this.updateTimer) { clearTimeout(this.updateTimer); this.updateTimer = null; }
+    if (this.pendingUpdate !== null) {
+      const e = this.pendingUpdate;
+      this.pendingUpdate = null;
+      this.broadcast(e);
+    }
+  }
+
   private emit(event: unknown) {
+    // Pi emits a message_update per token, each carrying the full message-so-far. Coalesce to
+    // the latest and flush at ~20Hz so the socket (and the phone's main thread) isn't flooded.
+    if (!!event && typeof event === "object" && (event as { type?: unknown }).type === "message_update") {
+      this.pendingUpdate = event;
+      if (!this.updateTimer) {
+        this.updateTimer = setTimeout(() => { this.updateTimer = null; this.flushPending(); }, 50);
+      }
+      return;
+    }
+    // Real event: flush any pending partial first to preserve order, then buffer + broadcast.
+    this.flushPending();
     // ponytail: cap replay buffer at 5000 events; older history drops if a run is huge.
+    // Partials are intentionally never buffered, so reconnect replay stays small.
     this.buffer.push(event);
     if (this.buffer.length > 5000) this.buffer.splice(0, this.buffer.length - 5000);
-    for (const s of this.subscribers) s(event);
+    this.broadcast(event);
   }
 
   attach(sub: Subscriber): () => void {
