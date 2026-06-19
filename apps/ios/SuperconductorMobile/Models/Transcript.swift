@@ -77,6 +77,28 @@ struct ChatMessageDTO: Decodable {
 }
 
 extension ChatMessage {
+    /// Maps the bridge's compact transcript dict (A) straight to a ChatMessage — no
+    /// JSONEncoder/JSONDecoder roundtrip (this runs per backlog message).
+    static func fromTranscriptDict(_ raw: [String: Any], id: String) -> ChatMessage? {
+        guard let role = raw["role"] as? String else { return nil }
+        let calls: [ChatToolCall] = (raw["toolCalls"] as? [[String: Any]] ?? []).map {
+            ChatToolCall(id: ($0["id"] as? String) ?? "",
+                         name: ($0["name"] as? String) ?? "tool",
+                         argsPreview: ($0["argsPreview"] as? String) ?? "")
+        }
+        var result: ChatToolResult? = nil
+        if let tr = raw["toolResult"] as? [String: Any] {
+            result = ChatToolResult(
+                toolCallId: tr["toolCallId"] as? String,
+                toolName: (tr["toolName"] as? String) ?? "tool",
+                isError: (tr["isError"] as? Bool) ?? false,
+                preview: (tr["preview"] as? String) ?? "")
+        }
+        return ChatMessage(id: id, role: role,
+                           text: raw["text"] as? String, thinking: raw["thinking"] as? String,
+                           toolCalls: calls, toolResult: result)
+    }
+
     /// Maps a raw Pi `message` object (B: RPC `message_end` events) to a ChatMessage.
     static func fromRawMessage(_ m: [String: Any], id: String) -> ChatMessage? {
         guard let role = m["role"] as? String else { return nil }

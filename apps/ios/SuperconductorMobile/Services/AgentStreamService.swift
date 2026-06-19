@@ -8,6 +8,7 @@ final class AgentStreamService {
     private(set) var lastStreamError: String?
     private var task: URLSessionWebSocketTask?
     private var receiveLoopTask: Task<Void, Never>?
+    private static let maxLines = 1500  // TerminalTextView joins the whole array each render
 
     func connect(connection: BridgeConnection, target: String, worktree: String? = nil) {
         disconnect()
@@ -45,16 +46,13 @@ final class AgentStreamService {
         while !Task.isCancelled {
             do {
                 let message = try await task.receive()
+                let raw: String?
                 switch message {
-                case .string(let text):
-                    applyEvent(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        applyEvent(text)
-                    }
-                @unknown default:
-                    break
+                case .string(let text): raw = text
+                case .data(let data): raw = String(data: data, encoding: .utf8)
+                @unknown default: raw = nil
                 }
+                if let raw, let json = await Self.parseJSON(raw) { applyEvent(json) }
             } catch {
                 isConnected = false
                 if !Task.isCancelled && !error.isCancellation { lastStreamError = error.localizedDescription }
@@ -63,22 +61,19 @@ final class AgentStreamService {
         }
     }
 
-    private func applyEvent(_ text: String) {
-        if let data = text.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let kind = json["kind"] as? String,
-           kind == "bridge_error",
-           let message = json["message"] as? String {
-            lastStreamError = message
-            return
-        }
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let kind = json["kind"] as? String,
-              kind == "agent_event",
+    private nonisolated static func parseJSON(_ s: String) async -> [String: Any]? {
+        await Task.detached(priority: .utility) {
+            guard let data = s.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }.value
+    }
+
+    private func applyEvent(_ json: [String: Any]) {
+        guard let kind = json["kind"] as? String else { return }
+        if kind == "bridge_error" { lastStreamError = json["message"] as? String; return }
+        guard kind == "agent_event",
               let payload = json["payload"] as? [String: Any],
-              let newLines = payload["lines"] as? [String]
-        else { return }
-        lines = newLines
+              let newLines = payload["lines"] as? [String] else { return }
+        lines = newLines.count > Self.maxLines ? Array(newLines.suffix(Self.maxLines)) : newLines
     }
 }

@@ -9,6 +9,7 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var isSending = false
     @State private var showModelPicker = false
+    @State private var lastStreamScroll = Date.distantPast
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -17,8 +18,12 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(model.displayMessages) { msg in
+                        ForEach(model.messages) { msg in
                             MessageRow(message: msg).id(msg.id)
+                        }
+                        // Live bubble kept out of `messages` so committed rows never re-diff against it.
+                        if model.isStreaming, let live = model.streamingMessage {
+                            MessageRow(message: live).id(live.id)
                         }
                         if model.isStreaming {
                             HStack(spacing: 8) {
@@ -35,7 +40,13 @@ struct ChatView: View {
                     // Animate small deltas (a reply landing); jump instantly for bulk backlog loads.
                     scrollToBottom(proxy, animated: new - old <= 2)
                 }
-                .onChange(of: model.streamingTick) { _, _ in scrollToBottom(proxy, animated: false) }
+                .onChange(of: model.streamingTick) { _, _ in
+                    // Streaming bumps ~20x/sec; cap forced-layout scrolls to ~6x/sec.
+                    let now = Date()
+                    guard now.timeIntervalSince(lastStreamScroll) > 0.15 else { return }
+                    lastStreamScroll = now
+                    scrollToBottom(proxy, animated: false)
+                }
                 .onChange(of: model.isStreaming) { _, _ in scrollToBottom(proxy, animated: false) }
             }
 

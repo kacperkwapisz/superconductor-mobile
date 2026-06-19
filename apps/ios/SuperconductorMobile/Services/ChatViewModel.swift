@@ -33,6 +33,8 @@ final class ChatViewModel {
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var committedCount = 0  // for stable ids
+    private var indexById: [String: Int] = [:]        // message id -> index (O(1) markdown fold)
+    private var toolCallOwner: [String: Int] = [:]    // toolCallId -> owning message index
     private var didInitialBacklog = false
     private var quietTask: Task<Void, Never>?  // transcript: clear "Working…" after a lull
     private var footerTask: Task<Void, Never>?
@@ -73,12 +75,6 @@ final class ChatViewModel {
             let mid = parts.count > 1 ? parts[1] : modelId
             sendRaw(["type": "set_model", "id": "set_model", "provider": provider, "modelId": mid])
         }
-    }
-
-    /// Committed messages + the live bubble (text/thinking/tool calls), when streaming.
-    var displayMessages: [ChatMessage] {
-        if isStreaming, let m = streamingMessage { return messages + [m] }
-        return messages
     }
 
     /// Rebuild the live bubble from the latest `partial` (full message-so-far) ~20x/sec.
@@ -210,7 +206,7 @@ final class ChatViewModel {
         guard !trimmed.isEmpty else { return }
         switch mode {
         case let .transcript(target, worktree):
-            messages.append(ChatMessage(id: "u-\(committedCount)", role: "user", text: trimmed))
+            appendMessage(ChatMessage(id: "u-\(committedCount)", role: "user", text: trimmed))
             committedCount += 1
             markActivity()
             do {
@@ -221,7 +217,7 @@ final class ChatViewModel {
             }
         case .rpc:
             // Optimistic echo; the user message_end will not be appended again (see handling).
-            messages.append(ChatMessage(id: "u-\(committedCount)", role: "user", text: trimmed))
+            appendMessage(ChatMessage(id: "u-\(committedCount)", role: "user", text: trimmed))
             committedCount += 1
             let cmd: [String: Any] = isStreaming
                 ? ["type": "prompt", "message": trimmed, "streamingBehavior": "steer"]
@@ -241,11 +237,14 @@ final class ChatViewModel {
         while !Task.isCancelled {
             do {
                 let msg = try await task.receive()
+                let raw: String?
                 switch msg {
-                case .string(let s): handle(s)
-                case .data(let d): if let s = String(data: d, encoding: .utf8) { handle(s) }
-                @unknown default: break
+                case .string(let s): raw = s
+                case .data(let d): raw = String(data: d, encoding: .utf8)
+                @unknown default: raw = nil
                 }
+                // Parse off the main actor: transcript backlog frames can be hundreds of KB.
+                if let raw, let obj = await Self.parseJSON(raw) { handle(obj) }
             } catch {
                 // Transport drops/teardown are not user-facing errors; real failures arrive as
                 // bridge_error / rpc_error / send failures. Just mark disconnected.
@@ -255,10 +254,14 @@ final class ChatViewModel {
         }
     }
 
-    private func handle(_ text: String) {
-        guard let data = text.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+    private nonisolated static func parseJSON(_ s: String) async -> [String: Any]? {
+        await Task.detached(priority: .utility) {
+            guard let data = s.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }.value
+    }
 
+    private func handle(_ obj: [String: Any]) {
         // Bridge envelope kinds (A + error)
         switch obj["kind"] as? String {
         case "not_pi":
@@ -337,15 +340,21 @@ final class ChatViewModel {
 
     private func appendTranscript(_ arr: [[String: Any]]) {
         for raw in arr {
-            guard let d = try? JSONSerialization.data(withJSONObject: raw),
-                  let dto = try? JSONDecoder().decode(ChatMessageDTO.self, from: d) else { continue }
+            // Map the dict directly — no JSONEncoder/JSONDecoder roundtrip per message on main.
+            guard let msg = ChatMessage.fromTranscriptDict(raw, id: "m-\(committedCount)") else { continue }
             // Skip the user message we already echoed optimistically on send.
-            if dto.role == "user", let last = messages.last, last.isUser, last.text == dto.text {
-                continue
-            }
-            absorb(dto.toMessage(id: "m-\(committedCount)"))
+            if msg.isUser, let last = messages.last, last.isUser, last.text == msg.text { continue }
+            absorb(msg)
             committedCount += 1
         }
+    }
+
+    /// Single append path: keeps id→index and toolCallId→owner maps in sync so
+    /// mergeToolResult / scheduleMarkdown stay O(1) instead of scanning the array.
+    private func appendMessage(_ msg: ChatMessage) {
+        indexById[msg.id] = messages.count
+        for c in msg.toolCalls where !c.id.isEmpty { toolCallOwner[c.id] = messages.count }
+        messages.append(msg)
     }
 
     /// Fold tool results into the matching assistant tool-call chip instead of a separate row.
@@ -353,7 +362,7 @@ final class ChatViewModel {
         if msg.isToolResult, let tr = msg.toolResult {
             if mergeToolResult(tr) { return }
         }
-        messages.append(msg)
+        appendMessage(msg)
         if msg.isAssistant, let t = msg.text, !t.isEmpty { scheduleMarkdown(id: msg.id, src: t) }
     }
 
@@ -364,7 +373,7 @@ final class ChatViewModel {
             let parsed = (try? AttributedString(markdown: src, options: .init(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(src)
             await MainActor.run {
-                guard let self, let i = self.messages.firstIndex(where: { $0.id == id }),
+                guard let self, let i = self.indexById[id], self.messages.indices.contains(i),
                       self.messages[i].text == src else { return }
                 self.messages[i].attributedText = parsed
             }
@@ -372,14 +381,18 @@ final class ChatViewModel {
     }
 
     private func mergeToolResult(_ tr: ChatToolResult) -> Bool {
+        // Fast path: jump straight to the owning message via the id map.
+        if let tid = tr.toolCallId, !tid.isEmpty, let i = toolCallOwner[tid],
+           messages.indices.contains(i),
+           let j = messages[i].toolCalls.firstIndex(where: { $0.id == tid }) {
+            messages[i].toolCalls[j].resultPreview = tr.preview
+            messages[i].toolCalls[j].isError = tr.isError
+            return true
+        }
+        // Fallback: name-based match (blank/missing tool-call id) — scan recent assistant rows.
         for i in messages.indices.reversed() {
             guard messages[i].isAssistant else { continue }
-            let idx: Int? = {
-                if let tid = tr.toolCallId, !tid.isEmpty,
-                   let j = messages[i].toolCalls.firstIndex(where: { $0.id == tid }) { return j }
-                return messages[i].toolCalls.firstIndex(where: { $0.resultPreview == nil && $0.name == tr.toolName })
-            }()
-            guard let j = idx else { continue }
+            guard let j = messages[i].toolCalls.firstIndex(where: { $0.resultPreview == nil && $0.name == tr.toolName }) else { continue }
             messages[i].toolCalls[j].resultPreview = tr.preview
             messages[i].toolCalls[j].isError = tr.isError
             return true
