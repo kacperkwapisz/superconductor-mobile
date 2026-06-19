@@ -1,63 +1,83 @@
 # Superconductor Mobile
 
-Native **iOS companion** for [Superconductor](https://super.engineering) on macOS. Official `sc` local API only—no SSH, no tmux.
+A native **iOS companion** for [Superconductor](https://super.engineering) on macOS — pair your phone with your Mac, browse your agents, and follow live Pi sessions from anywhere on your network. Built on the official `sc` local API only: no SSH, no tmux.
+
+> [!IMPORTANT]
+> **This is an unofficial, community-built project.** It is **not affiliated with, endorsed by, or supported by** Superconductor or its makers. "Superconductor" and related names are trademarks of their respective owners and are used here only to describe interoperability. Use at your own risk.
+
+> [!NOTE]
+> **TestFlight coming soon.** A public TestFlight build is planned so you won't need Xcode to try the app. Until then, build the iOS app yourself (see [iOS app](#ios-app)). This repo will track the TestFlight link here once it's live.
+
+## How it works
+
+```
+iPhone  ──HTTP/WebSocket──▶  Mac bridge  ──▶  sc … --output json  ──▶  Superconductor.app
+(SwiftUI)                    (Bun)             (official local API)
+```
+
+The Mac runs a small bridge that wraps the official `sc` CLI. The iPhone talks to that bridge over your private network (Tailscale or LAN). Pi keeps running inside Superconductor on the Mac — the phone is a live window into it.
 
 ## What's in the repo
 
 | Component | Path | Role |
 |-----------|------|------|
-| **Mac bridge** | `apps/bridge` | REST + WebSocket adapter over `sc … --json` |
-| **iOS app** | `apps/ios` | SwiftUI: pair → agents → live Pi terminal snapshots |
+| **Mac bridge** | `apps/bridge` | REST + WebSocket adapter over `sc … --output json` |
+| **Mac companion** | `apps/mac` | Menu bar app that hosts the bridge + QR pairing |
+| **iOS app** | `apps/ios` | SwiftUI: pair → agents → live Pi sessions + composer |
 | **Protocol** | `packages/protocol` | Shared TypeScript types |
 | **sc client** | `packages/sc-client` | Typed subprocess wrapper + subscribe JSONL |
 
-Design: [`docs/plans/2026-06-18-superconductor-mobile-design.md`](docs/plans/2026-06-18-superconductor-mobile-design.md)
+Design notes: [`docs/plans/2026-06-18-superconductor-mobile-design.md`](docs/plans/2026-06-18-superconductor-mobile-design.md)
 
 ## Requirements
 
 - macOS 14+ with **Superconductor.app running**
 - [Bun](https://bun.sh) on the Mac (bridge)
-- Xcode 15+ (iOS)
-- **Tailscale** (recommended) or same LAN for phone → Mac
+- Xcode 16+ and an iOS 26+ device (until TestFlight is available)
+- **Tailscale** (recommended) or the same LAN for phone → Mac
 
-## Mac bridge
+## Quick start
 
-The recommended way is the native **Mac menu bar companion** (see below).
+1. **Run the bridge** on your Mac (menu bar companion recommended — see [Mac companion](#mac-companion-recommended)):
 
-You can still run the bridge manually:
+   ```bash
+   bun install
+   bun run bridge:start
+   ```
 
-```bash
-bun install
-bun run bridge:start
-```
+   On first run, credentials are written to `~/.superconductor-mobile/bridge.json` (`token`, `fingerprint`, `port` default **9477**).
 
-On first run, credentials are written to `~/.superconductor-mobile/bridge.json` (`token`, `fingerprint`, `port` default **9477**).
+2. **Build and run the iOS app** (see [iOS app](#ios-app)).
 
-Optional env:
+3. **Pair**: enter your Mac's Tailscale/LAN IP, port `9477`, and the token from `bridge.json`.
 
-- `SC_MOBILE_BRIDGE_PORT` — listen port
-- `SC_MOBILE_BRIDGE_BIND` — default `0.0.0.0`
-- `SC_MOBILE_BRIDGE_HOST` — host shown for pairing (default: first LAN IPv4)
+4. Open **Agents** → your **Pi** session → live stream + composer.
 
-Verify:
+Verify the bridge is up:
 
 ```bash
 curl -s http://127.0.0.1:9477/v1/health
 curl -s -H "Authorization: Bearer YOUR_TOKEN" http://127.0.0.1:9477/v1/agents
 ```
 
-## Mac Companion (recommended)
+Optional bridge env:
 
-A small native macOS menu bar app that hosts the bridge + shows a beautiful QR code for instant pairing.
+- `SC_MOBILE_BRIDGE_PORT` — listen port (default `9477`)
+- `SC_MOBILE_BRIDGE_BIND` — default `0.0.0.0`
+- `SC_MOBILE_BRIDGE_HOST` — host shown for pairing (default: first LAN IPv4)
+
+## Mac companion (recommended)
+
+A small native macOS menu bar app that hosts the bridge and shows a scannable QR code for instant pairing.
 
 1. Build the standalone bridge binary (from repo root):
 
-```bash
-bun run companion:build-bridge
-# or: bun run --cwd apps/bridge build:standalone
-```
+   ```bash
+   bun run companion:build-bridge
+   # or: bun run --cwd apps/bridge build:standalone
+   ```
 
-2. (Recommended) Install [XcodeGen](https://github.com/yonaskolb/XcodeGen), then:
+2. Install [XcodeGen](https://github.com/yonaskolb/XcodeGen), then:
 
    ```bash
    cd apps/mac/SuperconductorMobileCompanion
@@ -65,27 +85,21 @@ bun run companion:build-bridge
    open SuperconductorMobileCompanion.xcodeproj
    ```
 
-   Or manually create a macOS App in Xcode and drop in the sources + Info.plist. Set deployment target macOS 14.0+.
+   (Or create a macOS App in Xcode and drop in the sources + Info.plist. Deployment target macOS 14.0+.)
 
-3. Build & run. You will see a menu bar icon ( phone symbol).
-
-4. Click it → popover shows a scannable QR code containing the full pairing payload.
-
-5. On iPhone: paste host/port/token or (future) scan QR. The iOS app continues to use the exact same HTTP/WS contract.
+3. Build & run — a menu bar icon appears. Click it for a QR code containing the full pairing payload.
 
 Key behaviors:
 - Auto-starts the bridge child process when the companion launches.
 - "Regenerate Token" writes a new `~/.superconductor-mobile/bridge.json` and restarts the server.
 - Prefers Tailscale (`tailscale ip -4`) when present; otherwise best LAN IP.
-- Set to "Launch at login" via macOS Users & Groups / Login Items (or the app can call `SMAppService`).
+- "Launch at login" via macOS Login Items.
 
-For packaging a distributable `.app`, see `apps/mac/build-companion.sh`. Embed the `bridge-server` executable inside the bundle.
-
-The public REST + WebSocket surface stays 100% stable. The iPhone app does not change.
+For a distributable `.app`, see `apps/mac/build-companion.sh` (embeds the `bridge-server` executable in the bundle).
 
 ## iOS app
 
-Generate Xcode project (requires [XcodeGen](https://github.com/yonaskolb/XcodeGen)):
+Until the TestFlight build is out, generate the Xcode project ([XcodeGen](https://github.com/yonaskolb/XcodeGen) required):
 
 ```bash
 cd apps/ios
@@ -94,24 +108,26 @@ xcodegen generate
 open SuperconductorMobile.xcodeproj
 ```
 
-**iOS 26+ only.** App icon uses **Icon Composer** (`AppIcon.icon` + Liquid Glass). Regenerate layers from the Mac app: `apps/ios/scripts/prepare-icon-composer.sh`, then open `AppIcon.icon` in **Icon Composer** (Xcode → Open Developer Tool) to tune Dark / Clear / Tinted.
+**iOS 26+ only.** App icon uses **Icon Composer** (`AppIcon.icon` + Liquid Glass). Open `AppIcon.icon` in Icon Composer (Xcode → Open Developer Tool) to tune Dark / Clear / Tinted.
 
-Run on device or simulator. **Pair Mac**:
+Run on device or simulator, then **Pair Mac**:
 
 1. Copy `token` from `~/.superconductor-mobile/bridge.json` on the Mac.
-2. Enter your Mac’s **Tailscale IP** (or LAN IP), port `9477`, and token.
+2. Enter your Mac's **Tailscale IP** (or LAN IP), port `9477`, and token.
 3. Open **Agents** → your **Pi** session → live stream + composer.
-
-## Terminal on iPhone
-
-Pi stays in Superconductor’s terminal on the Mac. The app shows **`terminal_snapshot`** lines from `sc agent subscribe` and sends input via `sc agent send`—the supported, documented path.
 
 ## Security
 
 - Treat the bridge token like a password.
-- Prefer Tailscale; do not port-forward to the public internet.
-- HTTPS/TLS for the bridge is planned; v1 uses HTTP on a private network.
+- Prefer Tailscale; **do not** port-forward the bridge to the public internet.
+- The bridge currently uses HTTP on a private network; HTTPS/TLS is planned.
+
+## Contributing
+
+Issues and PRs are welcome. The public REST + WebSocket surface is intended to stay stable — keep the `sc` CLI as the only privileged path (no SSH/tmux shortcuts).
 
 ## License
 
-Private / your project—add license as needed.
+[MIT](LICENSE) © 2026 Kacper Kwapisz.
+
+Not affiliated with Superconductor. Trademarks belong to their respective owners.
