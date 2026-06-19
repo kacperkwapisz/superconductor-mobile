@@ -259,7 +259,7 @@ Pair this iPhone with GET /v1/pairing (requires auth) or copy token from config.
         const worktreePath = decodeURIComponent(wtActionMatch[1]!);
         return req
           .json()
-          .then((body: { action?: string; provider?: string }) => runWorktreeAction(worktreePath, body))
+          .then((body: { action?: string; target?: string; provider?: string }) => runWorktreeAction(worktreePath, body))
           .catch((e) => json({ ok: false, error: formatErr(e) }, 502));
       }
 
@@ -655,6 +655,70 @@ async function openTranscriptStream(
     }
   };
   attachWatch();
+}
+
+async function runWorktreeAction(
+  worktreePath: string,
+  body: { action?: string; target?: string; provider?: string },
+) {
+  const actionId = body.action?.trim();
+  if (!actionId) return json({ ok: false, error: { code: "validation", message: "action required" } }, 400);
+  const def = actionById(actionId);
+  if (!def) return json({ ok: false, error: { code: "validation", message: "unknown action" } }, 400);
+
+  if (def.kind === "gh_merge") {
+    const out = await ghPrMerge(worktreePath, def.mergeMethod ?? "squash");
+    return json({ kind: "worktree_action", response: { action: actionId, ...out } }, out.ok ? 200 : 502);
+  }
+
+  // Same tab/conversation (Superconductor "inject current tab"): send the action prompt to the
+  // live agent. Only spawn a new tab when no agent target is supplied.
+  if (body.target) {
+    const result = await scJson<unknown>([
+      "agent", "send", "--to", body.target, "--prompt", def.prompt,
+      "--worktree", worktreePath, "--queue", "--output", "json",
+    ]);
+    return json({ kind: "worktree_action", response: { action: actionId, send: result } });
+  }
+
+  const provider = body.provider ?? "pi";
+  const result = await scJson<unknown>([
+    "layout", "run", "tabs", "--worktree", worktreePath, "--count", "1",
+    "--provider", provider, "--ui", "chat", "--initial-message", def.prompt, "--output", "json",
+  ]);
+  return json({ kind: "worktree_action", response: { action: actionId, orchestration: result } });
+}
+
+async function ghPrMerge(
+  worktreePath: string,
+  method: "squash" | "merge" | "rebase",
+): Promise<{ ok: boolean; output?: string; error?: string }> {
+  const branchRes = await runIn(worktreePath, "git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const branch = branchRes.stdout.trim();
+  if (!branch) return { ok: false, error: "could not determine branch" };
+  const list = await runIn(worktreePath, "gh", ["pr", "list", "--head", branch, "--json", "number", "--limit", "1"]);
+  let num: number | undefined;
+  try {
+    num = (JSON.parse(list.stdout.trim() || "[]") as { number: number }[])[0]?.number;
+  } catch {
+    return { ok: false, error: "could not parse gh pr list (is gh installed and authed?)" };
+  }
+  if (!num) return { ok: false, error: `no open PR for branch ${branch}` };
+  const merge = await runIn(worktreePath, "gh", ["pr", "merge", String(num), `--${method}`]);
+  if (merge.code !== 0) return { ok: false, error: (merge.stderr || merge.stdout).trim() || `gh exit ${merge.code}` };
+  return { ok: true, output: (merge.stdout || merge.stderr).trim() };
+}
+
+function runIn(cwd: string, cmd: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
+    child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", (e) => resolve({ code: 1, stdout: "", stderr: String(e) }));
+  });
 }
 
 async function listChatModels(providerKey: string): Promise<{ id: string; label: string }[]> {

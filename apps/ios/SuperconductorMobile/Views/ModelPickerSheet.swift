@@ -14,6 +14,14 @@ struct ModelPickerSheet: View {
         return options.filter { $0.label.lowercased().contains(q) || $0.id.lowercased().contains(q) }
     }
 
+    private var modelSearchSubtitle: String {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, filtered.count < options.count else {
+            return options.isEmpty ? "" : "\(options.count) models"
+        }
+        return "\(filtered.count) of \(options.count) models"
+    }
+
     private func isCurrent(_ opt: ModelOption) -> Bool {
         guard let m = model.footer?.model else { return false }
         return m == opt.id || m == opt.label || opt.id.hasSuffix("/\(m)") || opt.id == m
@@ -26,6 +34,12 @@ struct ModelPickerSheet: View {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if options.isEmpty {
                     ContentUnavailableView("No models", systemImage: "cpu", description: Text("Could not load model list from your Mac."))
+                } else if filtered.isEmpty {
+                    ContentUnavailableView(
+                        "No matches",
+                        systemImage: "magnifyingglass",
+                        description: Text("No models match “\(query.trimmingCharacters(in: .whitespacesAndNewlines))”. Try another search.")
+                    )
                 } else {
                     List(filtered) { opt in
                         Button {
@@ -52,6 +66,7 @@ struct ModelPickerSheet: View {
                 }
             }
             .navigationTitle("Model")
+            .navigationSubtitle(modelSearchSubtitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

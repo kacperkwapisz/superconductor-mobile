@@ -184,7 +184,7 @@ enum BridgeAPI {
         return try JSONDecoder().decode(WorktreeActionsEnvelope.self, from: data).response.actions
     }
 
-    static func runWorktreeAction(connection: BridgeConnection, worktreePath: String, action: String, provider: String = "pi") async throws {
+    static func runWorktreeAction(connection: BridgeConnection, worktreePath: String, action: String, target: String? = nil, provider: String = "pi") async throws {
         let enc = worktreePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? worktreePath
         let url = BridgeURL.v1(connection, path: "/v1/worktrees/\(enc)/action")
         var req = URLRequest(url: url)
@@ -192,7 +192,7 @@ enum BridgeAPI {
         req.timeoutInterval = 120
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
-        req.httpBody = try JSONEncoder().encode(WorktreeActionBody(action: action, provider: provider))
+        req.httpBody = try JSONEncoder().encode(WorktreeActionBody(action: action, target: target, provider: provider))
         let (data, resp) = try await BridgeURLSession.http.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             if let http = resp as? HTTPURLResponse, let msg = String(data: data, encoding: .utf8) {
@@ -310,5 +310,6 @@ private struct WorktreeActionsEnvelope: Decodable {
 
 private struct WorktreeActionBody: Encodable {
     var action: String
+    var target: String?
     var provider: String
 }

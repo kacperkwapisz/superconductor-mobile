@@ -101,7 +101,7 @@ struct AgentLeaf: Identifiable, Decodable, Equatable {
     }
 
     var isInteractive: Bool {
-        (capabilities?.send ?? false) && (capabilities?.subscribe ?? false)
+        (capabilities?.send ?? false) && (capabilities?.subscribe ?? false) && (capabilities?.read ?? false)
     }
 
     /// Tab number parsed from a selector like "view:1/tab:2/pane:1".

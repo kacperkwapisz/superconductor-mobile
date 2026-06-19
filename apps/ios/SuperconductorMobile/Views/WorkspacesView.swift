@@ -233,7 +233,7 @@ struct WorkspacesView: View {
                 Section("Worktree") {
                     ForEach(worktreeActions) { act in
                         Button(act.title, systemImage: iconForAction(act.id)) {
-                            Task { await runAction(act.id, path: wt.path) }
+                            Task { await runAction(act.id, wt: wt) }
                         }
                         .disabled(runningAction != nil)
                     }
@@ -320,12 +320,14 @@ struct WorkspacesView: View {
         }
     }
 
-    private func runAction(_ action: String, path: String) async {
+    private func runAction(_ action: String, wt: WorktreeNode) async {
         guard let c = session.connection, runningAction == nil else { return }
         runningAction = action
         defer { runningAction = nil }
+        // Prefer an existing Pi agent so the action runs in that tab/conversation.
+        let target = (wt.agents.first { $0.providerKey == "pi" } ?? wt.agents.first)?.target
         do {
-            try await BridgeAPI.runWorktreeAction(connection: c, worktreePath: path, action: action)
+            try await BridgeAPI.runWorktreeAction(connection: c, worktreePath: wt.path, action: action, target: target)
         } catch {
             session.lastError = error.localizedDescription
         }

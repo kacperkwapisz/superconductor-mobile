@@ -3,8 +3,15 @@ import SwiftUI
 struct AgentsView: View {
     @Environment(AppSession.self) private var session
 
+    private var interactiveAgents: [AgentRow] { session.agents.filter(\.isInteractive) }
+
     private var visibleAgents: [AgentRow] {
-        session.showAllAgents ? session.agents : session.agents.filter(\.isInteractive)
+        session.showAllAgents ? session.agents : interactiveAgents
+    }
+
+    private var hiddenByFilterCount: Int {
+        guard !session.showAllAgents else { return 0 }
+        return session.agents.count - interactiveAgents.count
     }
 
     var body: some View {
@@ -20,7 +27,7 @@ struct AgentsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if visibleAgents.isEmpty {
                     ContentUnavailableView(
-                        session.agents.isEmpty ? "No agents" : "No remote agents",
+                        emptyTitle,
                         systemImage: "terminal",
                         description: Text(emptyDescription)
                     )
@@ -37,6 +44,7 @@ struct AgentsView: View {
             }
             .background { AppTheme.screenBackground }
             .navigationTitle("Agents")
+            .navigationSubtitle(filterCountSubtitle)
             .navigationDestination(for: AgentRow.self) { agent in
                 AgentSessionView(agent: agent)
             }
@@ -71,11 +79,28 @@ struct AgentsView: View {
         }
     }
 
+    private var emptyTitle: String {
+        if session.agents.isEmpty { return "No agents" }
+        return "No controllable agents"
+    }
+
+    private var filterCountSubtitle: String {
+        guard !session.agents.isEmpty else { return "" }
+        if session.showAllAgents { return "\(session.agents.count) agents" }
+        if hiddenByFilterCount == 0 { return "\(visibleAgents.count) agents" }
+        return "\(visibleAgents.count) of \(session.agents.count) agents"
+    }
+
     private var emptyDescription: String {
         if session.agents.isEmpty {
             return "Open a Pi or chat session in Superconductor on your Mac, then refresh."
         }
-        return "Turn on “Show shell tabs” in the menu to include read-only terminals."
+        if hiddenByFilterCount > 0 {
+            let n = hiddenByFilterCount
+            let tabs = n == 1 ? "tab" : "tabs"
+            return "\(n) view-only \(tabs) hidden. Turn on “Show shell tabs” in the menu to include them."
+        }
+        return "Only Pi and chat tabs you can control from the phone are shown."
     }
 
     private func refresh() async {
